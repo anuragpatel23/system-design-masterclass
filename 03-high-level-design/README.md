@@ -30,4 +30,4 @@ Read a design once end-to-end. Then close the document and try to **re-derive th
 | [Payment System](payment-system/README.md) | Idempotency, exactly-once money movement, double-entry ledgers |
 | [Hotel Booking](hotel-booking/README.md) | Inventory contention, overselling prevention, distributed locking |
 
-Previous: [02 — Building Blocks](../02-building-blocks/README.md)
+Previous: [02 — Building Blocks](../02-building-blocks/README.md) · Next: [04 — Low-Level Design](../04-low-level-design/README.md)

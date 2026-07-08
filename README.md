@@ -1,382 +1,108 @@
-<div align="center">
+# System Design Masterclass — The Ultimate Interview Preparation Guide
 
-<img src="https://readme-typing-svg.demolab.com?font=Fira+Code&weight=700&size=32&pause=1000&color=6366F1&center=true&vCenter=true&width=700&lines=⚙️+System+Design+MasterClass;System+Design+%7C+Built+%26+Documented;From+Concepts+to+Production+Systems" alt="SystemDesignMasterclass" />
-
-<br/>
-
-# System Design Masterclass
-### *A living encyclopedia of System Design — concepts, implementations, and real-world architectures, all in one place.*
-
-<br/>
-
-[![Stars](https://img.shields.io/github/stars/anuragpatel23/system-design-masterclass?style=for-the-badge&color=6366f1&labelColor=1e1e2e)](https://github.com/anuragpatel23/system-design-masterclass/stargazers)
-[![Forks](https://img.shields.io/github/forks/https://github.com/anuragpatel23/system-design-masterclass?style=for-the-badge&color=10b981&labelColor=1e1e2e)](https://github.com/anuragpatel23/system-design-masterclass/network/members)
-[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen?style=for-the-badge&labelColor=1e1e2e)](CONTRIBUTING.md)
-[![License](https://img.shields.io/badge/License-MIT-blue?style=for-the-badge&labelColor=1e1e2e)](LICENSE)
-[![Last Commit](https://img.shields.io/github/last-commit/https://github.com/anuragpatel23/system-design-masterclass?style=for-the-badge&color=f59e0b&labelColor=1e1e2e)](https://github.com/anuragpatel23/system-design-masterclass/commits)
-
-<br/>
-
-> **Who is this for?** Senior engineers preparing for staff/principal interviews · Developers leveling up their architecture skills · Anyone who wants to *understand* systems, not just memorize them.
-
-</div>
+> A complete, self-contained vault for preparing system design interviews at any product company — from FAANG to high-growth startups — written to the depth expected of **senior / staff / principal** loops, while remaining a from-first-principles resource for anyone leveling up. Every topic is a standalone note, every note ends with a **60-Second Interview Answer** you can drill, and every design decision links back to the principle that justifies it.
 
 ---
 
-## 📖 What is System Design Masterclass?
+## The 12 Sections
 
-Most system design resources give you theory. System Design Masterclass gives you **implementation** alongside it.
-
-Every topic in this vault follows the same pattern:
-1. **Concept** — the "why" explained clearly
-2. **Design** — diagrams, trade-offs, and decision points
-3. **Implementation** — working code or pseudocode
-4. **Real-world reference** — how companies like Netflix, Uber, Discord solved it
-
-No fluff. No shallow overviews. Just deep, honest engineering.
+| # | Section | What it covers | Interview round it maps to |
+|---|---------|----------------|----------------------------|
+| 01 | [Foundations](01-foundations/README.md) | Scalability, availability math, CAP, consistency models, latency vs throughput | Every round — this is the vocabulary |
+| 02 | [Building Blocks](02-building-blocks/README.md) | Load balancers, caching, SQL/NoSQL, sharding, replication, queues, CDN, API gateway, rate limiting | HLD rounds — the Lego pieces |
+| 03 | [High-Level Design](03-high-level-design/README.md) | 12 complete designs: URL shortener, Twitter, WhatsApp, YouTube, Uber, payments, and more | The classic "design X" round |
+| 04 | [Low-Level Design](04-low-level-design/README.md) | Design patterns (creational/structural/behavioral) + 6 machine-coding problems | LLD / machine-coding rounds |
+| 05 | [Distributed Systems](05-distributed-systems/README.md) | Raft, Paxos, 2PC, sagas, CQRS/event sourcing, leader election, event-driven architecture | Staff+ "go one level deeper" follow-ups |
+| 06 | [Databases Deep Dive](06-databases-deep-dive/README.md) | B-Trees vs LSM-Trees, indexing, ACID/isolation levels, the database-scaling decision tree | "Why this database?" follow-ups |
+| 07 | [Microservices & Architecture Patterns](07-microservices/README.md) | Monolith vs microservices, service discovery, resilience patterns, service mesh, serverless, deployment patterns | Architecture-review and migration questions |
+| 08 | [API Design](08-api-design/README.md) | REST best practices & versioning, gRPC vs GraphQL vs REST, WebSockets/SSE, pagination, idempotency | API-design rounds; the "define your API" step of every HLD |
+| 09 | [Interview Prep](09-interview-prep/README.md) | The RESHADED framework, capacity-estimation cheat sheet, trade-off cheat sheet, question bank | The meta-skill: how to run the room |
+| 10 | [Security & Observability](10-security-observability/README.md) | AuthN/AuthZ (OAuth2, JWT, sessions), security essentials, metrics/logs/traces, SLOs | The "how do you secure/operate it?" follow-ups |
+| 11 | [Technology Deep Dives](11-technologies/README.md) | Redis, Kafka, RabbitMQ, Solace, email/SMS, Kong, Nginx, Docker, K8s, AWS, GCP, DevOps, Linux, Elasticsearch, ZooKeeper, Prometheus — each with a from-scratch **Java implementation** + install guide | "Okay, but how does Redis/Kafka *actually* work?" |
+| 12 | [Application Servers](12-app-servers/README.md) | Tomcat, JBoss/WildFly, Jetty — architecture, deployment workflow, day-2 operations | Enterprise-stack and "how does your code reach prod" questions |
 
 ---
 
-## 🗂️ Repository Structure
+## How the sections build on each other
 
 ```
-system-design-masterclass/
-│
-├── 📁 01-foundations/               # Core concepts every design builds on
-│   ├── scalability/
-│   ├── availability-reliability/
-│   ├── cap-theorem/
-│   ├── consistency-models/
-│   ├── latency-vs-throughput/
-│   └── README.md
-│
-├── 📁 02-building-blocks/           # Lego pieces of every large-scale system
-│   ├── load-balancers/
-│   ├── caching/
-│   ├── databases/
-│   │   ├── sql-vs-nosql/
-│   │   ├── sharding/
-│   │   └── replication/
-│   ├── message-queues/
-│   ├── cdn/
-│   ├── api-gateway/
-│   ├── rate-limiting/
-│   └── README.md
-│
-├── 📁 03-high-level-design/         # HLD: end-to-end system architectures
-│   ├── url-shortener/               # TinyURL, Bitly
-│   │   ├── design.md
-│   │   ├── architecture.png
-│   │   └── implementation/
-│   ├── twitter-feed/
-│   ├── whatsapp/
-│   ├── youtube/
-│   ├── uber/
-│   ├── netflix/
-│   ├── google-drive/
-│   ├── search-autocomplete/
-│   ├── notification-system/
-│   ├── payment-system/
-│   ├── hotel-booking/
-│   └── README.md
-│
-├── 📁 04-low-level-design/          # LLD: OOP, design patterns, machine coding
-│   ├── design-patterns/
-│   │   ├── creational/
-│   │   ├── structural/
-│   │   └── behavioral/
-│   ├── parking-lot/
-│   ├── library-management/
-│   ├── chess-game/
-│   ├── elevator-system/
-│   ├── food-delivery-app/
-│   ├── lru-cache/
-│   └── README.md
-│
-├── 📁 05-distributed-systems/       # The hard problems in distributed computing
-│   ├── consensus-algorithms/
-│   │   ├── raft/
-│   │   └── paxos/
-│   ├── distributed-transactions/
-│   ├── event-driven-architecture/
-│   ├── saga-pattern/
-│   ├── cqrs-event-sourcing/
-│   ├── leader-election/
-│   └── README.md
-│
-├── 📁 06-databases-deep-dive/       # Database internals and trade-offs
-│   ├── b-trees-lsm-trees/
-│   ├── indexing-strategies/
-│   ├── transactions-acid/
-│   ├── database-scaling/
-│   └── README.md
-│
-├── 📁 07-real-world-architectures/  # Reverse-engineered from engineering blogs
-│   ├── discord-messages/
-│   ├── instagram-stories/
-│   ├── airbnb-search/
-│   ├── linkedin-feed/
-│   ├── slack-real-time/
-│   └── README.md
-│
-├── 📁 08-api-design/                # Designing clean, scalable APIs
-│   ├── rest-best-practices/
-│   ├── graphql-design/
-│   ├── grpc-design/
-│   ├── websockets/
-│   ├── pagination-patterns/
-│   └── README.md
-│
-├── 📁 09-interview-prep/            # Structured interview playbook
-│   ├── interview-framework.md
-│   ├── common-mistakes.md
-│   ├── estimation-cheatsheet.md
-│   ├── question-bank.md
-│   └── README.md
-│
-├── 📁 10-resources/                 # Curated books, blogs, videos, papers
-│   ├── books.md
-│   ├── papers.md
-│   ├── engineering-blogs.md
-│   ├── youtube-channels.md
-│   └── README.md
-│
-├── 📄 CONTRIBUTING.md
-├── 📄 LICENSE
-└── 📄 README.md                     ← You are here
+01 Foundations ──────────────► the vocabulary (CAP, consistency, p99, nines)
+        │
+02 Building Blocks ──────────► the Lego pieces (cache, LB, shard, queue, CDN)
+        │
+03 High-Level Design ────────► assembling pieces into complete systems
+        │
+04 Low-Level Design ─────────► zooming into classes, patterns, machine coding
+        │
+05 Distributed Systems ──────► opening the black boxes (consensus, sagas)
+        │
+06 Databases Deep Dive ──────► opening the database (storage engines, isolation)
+        │
+07 Microservices ────────────► how organizations actually structure services
+        │
+08 API Design ───────────────► the contract layer between all of the above
+        │
+09 Interview Prep ───────────► the framework + drills to deliver it under pressure
+        │
+10 Security & Observability ─► the follow-ups that distinguish staff+ candidates
+        │
+11 Technology Deep Dives ────► the named tools, each rebuilt from scratch in Java
+        │
+12 Application Servers ──────► how Java code actually reaches and serves production
 ```
 
 ---
 
-## 🧭 How to Navigate This Vault
+## Suggested study plans
 
-> **Not sure where to start?** Use this guide based on your goal.
+**4-week plan (interview in a month, ~1.5h/day):**
 
-| Goal | Start Here |
-|------|-----------|
-| 🆕 New to system design | `01-foundations` → `02-building-blocks` |
-| 🎯 Interview in 2 weeks | `09-interview-prep` → `03-high-level-design` |
-| 🔩 Preparing for LLD round | `04-low-level-design` |
-| 🌐 Distributed systems deep dive | `05-distributed-systems` |
-| 🏢 Real architecture case studies | `07-real-world-architectures` |
-| 📚 Building long-term knowledge | Read everything, in order |
+| Week | Focus |
+|---|---|
+| 1 | All of 01 + 02. Drill the 60-second answers daily. |
+| 2 | Six designs from 03 (URL shortener, Twitter, WhatsApp, YouTube, Uber, payment system) + 09's RESHADED framework. Practice each design out loud with a timer. |
+| 3 | 05 + 06 + remaining designs from 03. |
+| 4 | 07 + 08 + 10, then 09's question bank. Full mock interviews on alternate days. |
 
----
+**1-week crash plan (interview next week):**
 
-## ✅ Design Coverage Tracker
+Day 1: 01 (all) + 09 interview-framework. Day 2–3: 03 — the four designs most likely for your target company. Day 4: 02 caching + sharding + queues + rate limiting. Day 5: 06 database-scaling + 05 saga pattern. Day 6: 09 capacity-estimation + tradeoff-cheatsheet. Day 7: mock interviews only.
 
-Each system follows a consistent structure. Here's the current build status:
-
-### 🏗️ High-Level Designs
-
-| System | Concept | Diagram | Implementation | Real-World Ref |
-|--------|---------|---------|----------------|----------------|
-| URL Shortener | ✅ | ✅ | ✅ | ✅ |
-| Twitter Feed | ✅ | ✅ | ✅ | 🔄 |
-| WhatsApp | ✅ | ✅ | 🔄 | ✅ |
-| YouTube | ✅ | 🔄 | 🔄 | ✅ |
-| Uber | 🔄 | 🔄 | ⬜ | 🔄 |
-| Netflix | 🔄 | ⬜ | ⬜ | ✅ |
-| Google Drive | ⬜ | ⬜ | ⬜ | ⬜ |
-| Notification System | ⬜ | ⬜ | ⬜ | ⬜ |
-| Payment System | ⬜ | ⬜ | ⬜ | ⬜ |
-
-> ✅ Done &nbsp;&nbsp; 🔄 In Progress &nbsp;&nbsp; ⬜ Planned
-
-### 🔩 Low-Level Designs
-
-| System | Design | Code (Java) | Code (Python) | Patterns Used |
-|--------|--------|-------------|---------------|---------------|
-| Parking Lot | ✅ | ✅ | ✅ | Strategy, Singleton |
-| LRU Cache | ✅ | ✅ | ✅ | — |
-| Chess Game | ✅ | 🔄 | ⬜ | Observer, Command |
-| Elevator System | 🔄 | ⬜ | ⬜ | State, Strategy |
-| Library Management | ⬜ | ⬜ | ⬜ | — |
+**LLD-focused plan (machine-coding round):** section 04 end to end, one problem per day, writing real code — then 08 for API-shape questions.
 
 ---
 
-## 📐 Design Template
+## How to use each note
 
-Every design in this vault follows this exact format so you always know what to expect:
+Every topic note follows the same structure, on purpose:
 
-```
-system-name/
-│
-├── README.md              # Overview, scope, assumptions
-├── design.md              # Full design document
-│   ├── 1. Requirements    # Functional & non-functional
-│   ├── 2. Estimations     # Scale, storage, bandwidth math
-│   ├── 3. HLD Diagram     # High-level architecture
-│   ├── 4. Component Deep Dive
-│   ├── 5. Data Model      # Schema / data structures
-│   ├── 6. API Design      # Key endpoints
-│   ├── 7. Trade-offs      # Decisions and why
-│   └── 8. Further Reading
-│
-├── architecture.png       # Clean architecture diagram
-│
-└── implementation/        # Code (where applicable)
-    ├── Java/
-    └── Python/
-```
+1. **The precise question it answers** — so you know when to reach for it in an interview.
+2. **The mechanism, from first principles** — not just what, but *why*, with ASCII diagrams and worked numbers.
+3. **Trade-offs stated as trade-offs** — every choice names what it costs, because "X is better" is a junior answer and "X buys you A at the cost of B, which is right here because C" is a senior one.
+4. **Real-world reference** — a named production system that made this choice, so your answer carries evidence.
+5. **Common pitfalls** — the specific wrong statements interviewers are listening for.
+6. **60-Second Interview Answer** — a drilled, complete paragraph you can deliver verbatim under pressure.
+
+**The drilling method:** read the note top to bottom once. Re-read tracing every diagram. Then cover everything except the title and reconstruct the 60-second answer from memory. Repeat any note you can't reconstruct after two attempts.
 
 ---
 
-## 🔑 Key Concepts Quick Reference
+## What "senior depth" means in practice (the bar this vault targets)
 
-<details>
-<summary><strong>📊 CAP Theorem</strong></summary>
-
-A distributed system can guarantee only **2 of 3**:
-
-- **C**onsistency — every read gets the most recent write
-- **A**vailability — every request gets a response
-- **P**artition Tolerance — system works despite network failures
-
-Since partition tolerance is non-negotiable in distributed systems, the real choice is **CP vs AP**.
-
-→ [Full deep dive](01-foundations/cap-theorem/README.md)
-
-</details>
-
-<details>
-<summary><strong>⚡ Caching Strategies</strong></summary>
-
-| Strategy | When to use | Risk |
-|----------|-------------|------|
-| Cache-aside | Read-heavy, occasional updates | Cache miss on cold start |
-| Write-through | Consistency critical | Write latency |
-| Write-behind | Write-heavy workloads | Data loss on crash |
-| Read-through | Simplicity needed | Cache miss penalty |
-
-→ [Full deep dive](02-building-blocks/caching/README.md)
-
-</details>
-
-<details>
-<summary><strong>🗄️ SQL vs NoSQL — When to choose what</strong></summary>
-
-**Choose SQL when:** ACID compliance needed · Complex queries · Structured, relational data
-
-**Choose NoSQL when:** Massive scale · Flexible schema · High write throughput · Key-value / document / graph data models
-
-→ [Full deep dive](02-building-blocks/databases/sql-vs-nosql/README.md)
-
-</details>
-
-<details>
-<summary><strong>📬 Message Queue Patterns</strong></summary>
-
-- **Point-to-point** (Queues) — one consumer per message (SQS)
-- **Pub/Sub** — multiple consumers per message (Kafka, SNS)
-- **Dead Letter Queue** — handle failed messages gracefully
-
-→ [Full deep dive](02-building-blocks/message-queues/README.md)
-
-</details>
+- **Numbers, not adjectives.** "High QPS" is junior; "~1.2M reads/sec at p99 < 50ms, so a single Postgres primary is out and we're choosing between a cache-fronted cluster and Cassandra" is senior. Section 09's capacity-estimation note gives you the numbers to memorize.
+- **Mechanisms, not names.** Naming Kafka is junior; explaining that its partition-per-consumer model gives ordered, at-least-once delivery within a partition — and what that forces on your idempotency design — is senior. Sections 05, 06, and 08 exist for exactly this.
+- **Trade-offs, not features.** Every real decision sacrifices something. If your design has no stated costs, the interviewer assumes you can't see them.
+- **Failure modes, unprompted.** Staff+ candidates volunteer what happens when the cache dies, the region partitions, or the queue backs up — before being asked. Sections 01, 05, 07, and 10 arm you for this.
 
 ---
 
-## 🎯 Interview Framework (RESHADED)
+## Quick topic finder (interview panic index)
 
-When answering any system design question, use this checklist:
-
-```
-R — Requirements        Clarify functional & non-functional needs
-E — Estimation          Back-of-envelope: users, QPS, storage
-S — Storage             Choose the right database(s) and why
-H — High-Level Design   Draw the big picture first
-A — APIs                Define key endpoints
-D — Data Model          Schema, entities, relationships
-E — Extended Design     Deep dive: caching, sharding, failover
-D — Discussion          Trade-offs, bottlenecks, future scaling
-```
-
-→ [Full interview playbook](09-interview-prep/interview-framework.md)
-
----
-
-## 📚 Recommended Learning Path
-
-```
-Week 1–2   ┌─────────────────────────────────┐
-           │  01-foundations                  │
-           │  02-building-blocks              │
-           └─────────────────────────────────┘
-                          ↓
-Week 3–4   ┌─────────────────────────────────┐
-           │  03-high-level-design (5 systems)│
-           │  09-interview-prep (framework)   │
-           └─────────────────────────────────┘
-                          ↓
-Week 5–6   ┌─────────────────────────────────┐
-           │  04-low-level-design             │
-           │  05-distributed-systems          │
-           └─────────────────────────────────┘
-                          ↓
-Ongoing    ┌─────────────────────────────────┐
-           │  07-real-world-architectures     │
-           │  06-databases-deep-dive          │
-           │  10-resources (papers & blogs)   │
-           └─────────────────────────────────┘
-```
-
----
-
-## 🌍 Real-World Engineering Blogs Worth Reading
-
-> Referenced throughout this vault. Bookmark all of them.
-
-| Company | Blog |
-|---------|------|
-| Netflix | [netflixtechblog.com](https://netflixtechblog.com) |
-| Uber | [eng.uber.com](https://eng.uber.com) |
-| Discord | [discord.com/blog](https://discord.com/blog/engineering) |
-| Airbnb | [medium.com/airbnb-engineering](https://medium.com/airbnb-engineering) |
-| LinkedIn | [engineering.linkedin.com](https://engineering.linkedin.com/blog) |
-| Meta | [engineering.fb.com](https://engineering.fb.com) |
-| Figma | [figma.com/blog/engineering](https://www.figma.com/blog/section/engineering) |
-| Shopify | [shopify.engineering](https://shopify.engineering) |
-
----
-
-## 🤝 Contributing
-
-Contributions are what make this vault grow. Here's how to help:
-
-1. **Fork** the repository
-2. Create a feature branch: `git checkout -b add/twitter-hld`
-3. Follow the [design template](#-design-template) for consistency
-4. Submit a **Pull Request** with a clear description
-
-Please read [CONTRIBUTING.md](CONTRIBUTING.md) before submitting.
-
-**Good first contributions:**
-- Add a missing diagram to an existing design
-- Add implementation code for a designed system
-- Add a real-world reference with a link + summary
-- Fix incorrect information with a source
-
----
-
-## ⭐ Show Your Support
-
-If this vault helped you land an interview, understand a system better, or just saved you hours of searching — **drop a star**. It helps others find this resource.
-
-[![Star this repo](https://img.shields.io/github/stars/YOUR_USERNAME/archvault?style=social)](https://github.com/anuragpatel23/system-design-masterclass)
-
----
-
-## 📄 License
-
-This project is licensed under the **MIT License** — see [LICENSE](LICENSE) for details.
-
----
-
-<div align="center">
-
-*Built with ❤️ for engineers who care about building things that scale.*
-
-**[⬆ Back to top](#)**
-
-</div>
+| If asked about… | Go to |
+|---|---|
+| "Design a system that…" | [09 RESHADED framework](09-interview-prep/interview-framework.md) first, then the closest match in [03](03-high-level-design/README.md) |
+| "How would you scale this database?" | [Database Scaling](06-databases-deep-dive/database-scaling/README.md) → [Sharding](02-building-blocks/databases/sharding/README.md) → [Replication](02-building-blocks/databases/replication/README.md) |
+| "How do services find/talk to each other?" | [Service Discovery](07-microservices/service-discovery/README.md) → [gRPC vs REST](08-api-design/grpc-graphql-rest/README.md) |
+| "What if this call fails?" | [Resilience Patterns](07-microservices/resilience-patterns/README.md) → [Saga Pattern](05-distributed-systems/saga-pattern/README.md) → [Idempotency](08-api-design/idempotency/README.md) |
+| "Estimate the storage/QPS" | [Capacity Estimation](09-interview-prep/capacity-estimation.md) |
+| "How do you secure it?" | [AuthN/AuthZ](10-security-

@@ -1,0 +1,42 @@
+# Observability — Metrics, Logs, Traces, SLOs & Error Budgets
+
+> **The question this answers, precisely:** after "how would you scale it?" comes "how do you know it's healthy — and when it isn't, how do you find *why* in a system of 50 services?" The distinction to open with: **monitoring** tells you *that* a known signal crossed a threshold; **observability** is the property that lets you ask *new* questions of a running system — including ones you didn't anticipate when you instrumented it.
+
+---
+
+## 1. The three pillars, and what each is actually for
+
+**Metrics** — cheap, aggregated numbers over time (counters, gauges, histograms). Answer: *"is something wrong, and how much?"* They're the alerting substrate because they're pre-aggregated and cheap to store/query at any scale — but they've discarded per-request detail by design.
+- **The histogram detail that matters:** you cannot average percentiles — p99 must come from histogram buckets aggregated across instances, and "the mean of per-server p99s" is a meaningless number ([tail latency](../../01-foundations/latency-vs-throughput/README.md)). Also beware **cardinality**: metrics labeled by user_id explode the time-series count — that's what logs/traces are for.
+- **The four golden signals** (Google SRE's canon — memorize as a set): **latency** (as percentiles, and *separately for successes and failures* — fast errors poison the latency picture), **traffic** (load: QPS, connections), **errors** (rate, by class), **saturation** (how close to capacity — queue depth, connection-pool utilization, memory pressure; the leading indicator while the other three are trailing). RED (rate/errors/duration per service) and USE (utilization/saturation/errors per resource) are the same idea re-sliced.
+
+**Logs** — timestamped, per-event records. Answer: *"what exactly happened in this specific case?"* Production-grade means **structured** (JSON fields, machine-queryable — `{"event":"payment_failed","order_id":...,"decline_code":...}`), centralized (ELK/Loki-class pipeline), sampled/leveled for cost (the priciest pillar per byte), and **always carrying the correlation/trace ID** — the field that stitches the pillars together.
+
+**Traces** — the distributed request's biography. One request gets a **trace ID** at the edge, **propagated in headers across every hop** ([gateway](../../02-building-blocks/api-gateway/README.md) → services → [queues](../../02-building-blocks/message-queues/README.md)); each unit of work is a timed **span** with a parent. Answer: *"where did these 800ms go — and which of the 12 services involved is the culprit?"* — the question that is literally unanswerable per-service in a microservice system, which is why [the microservices tax](../../07-microservices/monolith-vs-microservices/README.md) includes tracing as a *requirement*, not a luxury. Costs: instrumentation everywhere (the [service mesh](../../07-microservices/service-mesh/README.md) auto-generates the inter-service spans; in-process detail still needs code), and **sampling** (tracing every request at scale is unaffordable — head-based sampling is cheap but blind; **tail-based sampling** — decide *after* the request whether it was interesting: slow, errored — keeps the traces you actually want at the price of buffering). Standard: **OpenTelemetry** as the vendor-neutral instrumentation layer; Dapper is the lineage paper.
+
+**How an incident actually uses them (the answer's spine):** metric alert fires ("checkout p99 breached") → dashboard localizes (golden signals per service: payments saturated) → traces confirm the path and the hop eating the time → logs on that service, filtered by trace ID, name the cause (connection pool exhausted). **Metrics detect, traces localize, logs explain.**
+
+## 2. SLIs, SLOs, and error budgets — observability turned into policy
+
+- **SLI:** a measured indicator of user-visible health — "fraction of checkout requests succeeding in < 500ms." Choose SLIs at the *user boundary*, not per-machine (users experience requests, not CPUs).
+- **SLO:** the target — "99.9% over 30 days." Deliberately less than 100%, because [each nine multiplies cost](../../01-foundations/availability-reliability/README.md) and 100% is indistinguishable from 99.99% to users on flaky networks. (The **SLA** is the *contractual* version with penalties — external, looser than the internal SLO.)
+- **Error budget — the operational genius:** 99.9% over 30 days = **~43 minutes of failure allowed**. That budget is *spendable*: it converts the eternal "ship fast vs stay safe" argument into arithmetic — budget remaining ⇒ ship, [canary](../../07-microservices/deployment-patterns/README.md) aggressively, run chaos experiments; budget burned ⇒ feature work yields to reliability work, by pre-agreed policy rather than by post-incident shouting. **Alert on burn *rate***, not raw thresholds ("at this failure rate we exhaust the month's budget in 6 hours") — it pages for what threatens the SLO and stays silent for what doesn't, which is also the cure for pager fatigue (every alert should be *actionable*; symptom-based alerts on SLIs, not cause-based alerts on every disk).
+
+## 3. What "senior" sounds like in this topic
+
+Instrument at design time, not post-incident ("every service emits RED metrics and propagates trace context from day one — the mesh gives us the inter-service half free"); watch **saturation as the leading indicator**; keep **dashboards per service, uniform** (every service's four golden signals in the same layout — during an incident nobody wants creative dashboards); and close the loop: the metrics that judge a [canary](../../07-microservices/deployment-patterns/README.md), trip a [circuit breaker](../../07-microservices/resilience-patterns/README.md), and drive autoscaling are *this* system — observability isn't a reporting layer, it's a control-plane input.
+
+## 4. Common pitfalls
+
+- Averaging percentiles, or reporting average latency at all when tails are the question.
+- Unstructured logs ("Payment failed!!") — grep-able is not queryable; and logs without trace IDs can't be joined to anything.
+- Alerting on causes (CPU > 80%) instead of symptoms (SLI burn) — pages that don't map to user pain train people to ignore pages.
+- 100% availability targets — an SLO with no error budget forbids all change and all honesty.
+- Metrics with unbounded label cardinality (per-user, per-URL) — the observability system becomes the outage.
+- Designing tracing but forgetting propagation through *async* hops — the trace must survive the [queue](../../02-building-blocks/message-queues/README.md) (context in message headers), or every async workflow becomes a trace cliff.
+
+## 5. 60-Second Interview Answer
+
+> "I'd structure it as the three pillars with distinct jobs: metrics — cheap aggregated time series — detect problems and feed alerting; traces — a trace ID propagated across every hop, including through queues, with timed spans per unit of work — localize which of the twelve services ate the 800 milliseconds; and structured logs carrying that same trace ID explain the specific failure. Per service I'd standardize the four golden signals: latency as histogram-derived percentiles because you can't average p99s, traffic, errors, and saturation — the leading indicator. The mesh auto-instruments the inter-service spans, OpenTelemetry is the vendor-neutral layer, and at scale you tail-sample traces so you keep the slow and errored ones. Then I'd make it policy with SLOs: pick user-boundary SLIs like 'checkout succeeds under 500 milliseconds', target 99.9% — which grants a 43-minute monthly error budget — and alert on budget burn rate rather than raw thresholds, so pages map to user pain. The budget converts ship-versus-safety into arithmetic: budget left, we canary aggressively; budget burned, reliability work wins by pre-agreed rule. And the loop closes back into the architecture — these same metrics judge canaries, trip circuit breakers, and drive autoscaling."
+
+**Related:** [Availability & Reliability](../../01-foundations/availability-reliability/README.md) · [Latency vs Throughput](../../01-foundations/latency-vs-throughput/README.md) · [Deployment Patterns](../../07-microservices/deployment-patterns/README.md) · [Service Mesh](../../07-microservices/service-mesh/README.md) · [Resilience Patterns](../../07-microservices/resilience-patterns/README.md)

@@ -24,4 +24,4 @@ Read [Design Patterns](design-patterns/creational/README.md) first ([structural]
 | [Library Management](library-management/README.md) | Classic entity relationships + reservation/holds workflow |
 | [Food Delivery App](food-delivery-app/README.md) | Multi-actor state machine (order/restaurant/rider) spanning several of the other patterns |
 
-Previous: [03 — High-Level Design](../03-high-level-design/README.md)
+Previous: [03 — High-Level Design](../03-high-level-design/README.md) · Next: [05 — Distributed Systems](../05-distributed-systems/README.md)

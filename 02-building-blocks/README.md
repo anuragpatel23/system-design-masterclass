@@ -28,4 +28,4 @@ Client → CDN (static assets) → API Gateway (auth + rate limit)
 
 Understand each piece in isolation first (this section), then watch them combine in section 03 (`03-high-level-design`).
 
-Previous: [01 — Foundations](../01-foundations/README.md)
+Previous: [01 — Foundations](../01-foundations/README.md) · Next: [03 — High-Level Design](../03-high-level-design/README.md)

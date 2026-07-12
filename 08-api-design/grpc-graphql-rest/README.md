@@ -17,7 +17,78 @@
 - **Solves two real client problems:** **over-fetching** (mobile client needs 3 fields, REST returns 40) and **under-fetching / the N+1 request problem** (render a screen = 1 request for the post + N requests for each author — GraphQL fetches the whole graph in one round trip). Strongly typed schema + introspection give excellent tooling.
 - **The costs are server-side, and they're substantial:** every client can now write an arbitrarily expensive query, so you need **query-cost analysis / depth limiting** (a malicious or naive deeply-nested query is a DoS vector — see [Rate Limiting](../../02-building-blocks/rate-limiting/README.md), which must become cost-based, not request-based); the **N+1 problem reappears server-side** in resolvers (each post's author resolved with its own DB query — mitigated by **DataLoader**-style batching, a term worth naming); and HTTP caching largely breaks (POSTs to one endpoint — you rebuild caching at the application layer). Also: with great flexibility comes unpredictable load profiles — capacity planning is harder than for a fixed set of REST endpoints.
 
-## 2. The decision framework: match the style to the boundary
+## 2. What each one actually looks like on the wire
+
+Concepts are easy to nod along to; the concrete request/response shape is what makes the trade-offs click.
+
+### REST — a plain HTTP request, JSON body
+```
+GET /users/42/orders?status=shipped HTTP/1.1
+Host: api.example.com
+Authorization: Bearer <token>
+
+HTTP/1.1 200 OK
+Content-Type: application/json
+
+{
+  "orders": [
+    { "id": 456, "status": "shipped", "total_cents": 4999 }
+  ]
+}
+```
+The client always gets back *whatever shape the server decided this endpoint returns* — if the mobile app only needs `id` and `status`, it still receives `total_cents` too (over-fetching). If it also needs the customer's name, that's a second round trip to `/users/42` (under-fetching).
+
+### gRPC — a `.proto` schema compiles into typed client/server code
+```protobuf
+// orders.proto
+syntax = "proto3";
+
+service OrderService {
+  rpc GetOrder (GetOrderRequest) returns (Order);
+  rpc StreamOrderUpdates (GetOrderRequest) returns (stream Order); // server streaming
+}
+
+message GetOrderRequest {
+  int64 order_id = 1;
+}
+
+message Order {
+  int64 id = 1;
+  string status = 2;
+  int64 total_cents = 3;
+}
+```
+The compiler (`protoc`) generates a strongly-typed `OrderServiceClient` and `OrderServiceServer` base class in whatever language each side uses (Java, Go, Python, etc.) — calling it looks like a local method call (`client.getOrder(request)`), not like assembling a URL and parsing JSON. On the wire, the message is packed into a compact binary format keyed by the field numbers (`= 1`, `= 2`, `= 3`), not field names — this is the source of both protobuf's small size and the rule that **field numbers, once shipped, can never be reused or renumbered** (doing so silently corrupts data for anyone still on an old client).
+
+### GraphQL — one endpoint, the client shapes the response
+```graphql
+POST /graphql
+{
+  user(id: 42) {
+    name
+    orders(status: SHIPPED) {
+      id
+      status
+      total_cents
+    }
+  }
+}
+```
+```json
+{
+  "data": {
+    "user": {
+      "name": "Priya Shah",
+      "orders": [
+        { "id": 456, "status": "SHIPPED", "total_cents": 4999 }
+      ]
+    }
+  }
+}
+```
+One round trip returns exactly the fields asked for — the user's name *and* their orders, nothing more, nothing less. That single query is resolved server-side by a **resolver graph**: a `User` resolver fetches the user row, then an `orders` resolver (attached to `User`) fetches that user's orders — and if this were rendering a list of 50 users each with orders, naively calling the orders resolver once per user is exactly the **N+1 problem** reappearing on the server side, which is what DataLoader-style batching (collect all 50 user IDs, issue one batched `WHERE user_id IN (...)` query) exists to fix.
+
+## 3. The decision framework: match the style to the boundary
 
 | Boundary | Default choice | Why |
 |---|---|---|
@@ -28,13 +99,13 @@
 
 **The composition that describes many real systems (and is a great whiteboard sentence):** *public REST at the edge, GraphQL as the backend-for-frontend aggregation layer for our own apps, gRPC for everything service-to-service behind the [gateway](../../02-building-blocks/api-gateway/README.md).*
 
-## 3. Real-world references
+## 4. Real-world references
 
 - **Google** — gRPC is the open-sourcing of its internal Stubby; essentially all internal Google service traffic is schema-first binary RPC. The lesson: at high internal call volumes, serialization efficiency and generated contracts pay for themselves.
 - **GitHub/Shopify** — public GraphQL APIs (with documented **query cost limits** — evidence that cost-based rate limiting isn't optional); **Facebook** built GraphQL for exactly the mobile-screen aggregation problem.
 - **Stripe/Twilio** — deliberately REST-only public APIs: for third-party longevity and onboarding, boring wins.
 
-## 4. Common pitfalls
+## 5. Common pitfalls
 
 - Recommending GraphQL "because it's flexible" without naming query-cost control, resolver N+1/DataLoader, and the caching loss — flexibility is the *problem statement*, not the win.
 - Recommending gRPC for a public browser-facing API without mentioning gRPC-Web/proxying.
@@ -42,7 +113,7 @@
 - Treating them as rivals for one slot instead of assigning per-boundary.
 - Saying "REST is slow" — JSON-over-HTTP/1.1 vs protobuf-over-HTTP/2 differences matter at high internal volumes; they rarely dominate a public API's latency budget, where a database query dwarfs serialization.
 
-## 5. 60-Second Interview Answer
+## 6. 60-Second Interview Answer
 
 > "I assign the style per boundary. Public APIs default to REST: ubiquity, human-debuggability, HTTP caching, and contract longevity dominate there, which is why Stripe and Twilio are deliberately REST-only. Internal service-to-service defaults to gRPC: schema-first protobuf gives generated, compiler-enforced contracts across teams, binary encoding is several times smaller and cheaper than JSON, HTTP/2 multiplexes calls over one connection, and streaming is native — the trade-offs, browser unfriendliness and unreadable payloads, don't matter when you own both ends, though you do need L7-aware load balancing because long-lived HTTP/2 connections pin to backends under naive L4 balancing. GraphQL earns its place as a backend-for-frontend aggregation layer: it solves mobile over-fetching and the one-round-trip-per-screen problem — but the flexibility transfers cost to the server, so it demands query-cost limits so arbitrary nested queries can't DoS you, DataLoader-style batching for resolver N+1, and rebuilt caching since HTTP caching breaks. Many real architectures are exactly that composition: REST at the public edge, GraphQL BFF for first-party apps, gRPC behind the gateway."
 

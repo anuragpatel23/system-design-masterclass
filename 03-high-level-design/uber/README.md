@@ -51,35 +51,53 @@ Divides the sphere (the actual Earth, accounting for curvature properly, unlike 
 
 ## 4. High-Level Design
 
+```mermaid
+graph TD
+    DriverApp([Driver App])
+    RiderApp([Rider App])
+    LB[Load Balancer]
+
+    subgraph LocationTier["Location Ingestion — Auto Scaling Group"]
+        LocSvc[Location Ingestion Service]
+    end
+
+    GeoIndex[(Redis GEO Index<br/>sharded by city/region)]
+
+    subgraph MatchingTier["Matching — Auto Scaling Group"]
+        MatchSvc[Matching Service<br/>query · rank · lock]
+    end
+
+    LockStore[(Redis Distributed Lock<br/>SET NX PX on driver_id)]
+    TripDB[(Trip DB<br/>ACID status transitions)]
+    Notify[Notification Service]
+
+    DriverApp -->|"location ping every ~4s"| LB --> LocSvc
+    LocSvc -->|"1. GEOADD, update driver's cell"| GeoIndex
+
+    RiderApp -->|"POST /rides/request"| LB --> MatchSvc
+    MatchSvc -->|"2. GEOSEARCH rider's cell + 8 neighbors"| GeoIndex
+    MatchSvc -->|"3. rank by distance, ETA, rating"| MatchSvc
+    MatchSvc -->|"4. acquire lock on chosen driver"| LockStore
+    MatchSvc -->|"5. persist MATCHED trip"| TripDB
+    MatchSvc -->|"6. notify both parties"| Notify
+    Notify -.->|push: trip request| DriverApp
+    Notify -.->|"live status (WebSocket)"| RiderApp
+
+    style GeoIndex fill:#f9d976,stroke:#333
+    style LockStore fill:#ffb3b3,stroke:#333
+    style TripDB fill:#a8d5ff,stroke:#333
 ```
-  Driver app ──(location ping every ~4s)──▶ Location Ingestion Service
-                                                    │
-                                          Update driver's current
-                                          geohash cell in a fast,
-                                          in-memory geospatial index
-                                          (Redis GEO commands, keyed
-                                          by city/region shard)
-                                                    │
-  Rider app ──(request ride, lat/lng)───▶ Matching Service
-                                                    │
-                                          Compute rider's geohash cell
-                                          + query the same cell and its
-                                          8 neighbors for available,
-                                          nearby drivers
-                                                    │
-                                          Rank candidates (distance,
-                                          ETA, driver rating -- a
-                                          scoring step, mention but
-                                          don't over-design unless asked)
-                                                    │
-                                          Attempt to LOCK the chosen
-                                          driver (see Component Deep
-                                          Dive: Preventing Double-Match)
-                                                    │
-                                          Notify driver of the request;
-                                          on accept, create Trip record,
-                                          notify rider
-```
+
+**Take this as the reference architecture** — notice the diagram deliberately separates the high-frequency, loss-tolerant **location ingestion** path (top) from the low-frequency, correctness-critical **matching** path (bottom); they only meet at the shared Redis GEO index, which is exactly the "different components for different volume/latency profiles" reasoning from §2.
+
+**Location ingestion, step by step:** every ~4 seconds, each active driver's app pings its coordinates through the Load Balancer to the **Location Ingestion Service** — a thin, horizontally-scaled, stateless tier whose only job is a single `GEOADD` call updating that driver's position in the **Redis GEO index**, sharded per city/region (§6) so a write never has to consider drivers outside its own geography. This path is deliberately built to tolerate occasional lost updates (§8) since a slightly stale position is a minor inconvenience, not a correctness bug.
+
+**Matching, step by step:**
+1. A ride request reaches the **Matching Service**, which computes the rider's geohash cell and issues a `GEOSEARCH` against that cell plus its 8 neighbors (§3) — a bounded, fast, purely local query regardless of how many total drivers exist globally.
+2. Candidates are ranked by distance, estimated time of arrival, and driver rating (a scoring step, explicitly scoped as a related-but-separate concern in §1).
+3. The service attempts to acquire a **short-lived distributed lock** on the top candidate before doing anything else (§5) — this is the step that converts an otherwise race-prone read into a safe, exclusive claim.
+4. On successful lock, a `trip` record is persisted as `MATCHED` in the **Trip DB**, and the **Notification Service** pushes the request to the driver's app and opens a live status channel (typically a persistent WebSocket, per §8) to the rider's app.
+5. If the lock attempt fails (another concurrent request already claimed that driver), the Matching Service simply retries against the next-ranked candidate — no special error handling needed beyond that fallback.
 
 ---
 
@@ -91,7 +109,21 @@ Two riders requesting a ride at nearly the same moment, both matched to the same
 
 ---
 
-## 6. Data Model
+## 6. Components Used — What Each Piece Is and Why It's Here
+
+| Component | Role in This Design | Why This Choice, Here Specifically | Deep Dive |
+|---|---|---|---|
+| **Load Balancer** | Fronts both the Location Ingestion Service and the Matching Service | Two very different traffic shapes (§2) sharing one entry tier, health-checked and routed at L7 | [Load Balancers](../../02-building-blocks/load-balancers/README.md) |
+| **Auto Scaling Group (Location Ingestion Tier)** | Absorbs the dominant write volume in this entire system — ~1.25M location pings/sec globally | The service does one cheap `GEOADD` per request with no cross-request coordination, making it a textbook case for stateless horizontal scaling proportional to active-driver count | [Scalability](../../01-foundations/scalability/README.md) |
+| **Auto Scaling Group (Matching Tier)** | Runs the ranking and locking logic per ride request | Lower request volume than ingestion (§2) but each request does more work (a geo query, ranking, a lock attempt, a DB write) — scaled and provisioned independently from the ingestion tier for exactly that reason | [Scalability](../../01-foundations/scalability/README.md) |
+| **Redis GEO Index** | The live, queryable "who's nearby right now" structure, sharded per city/region | Geohashing gives cheap proximity queries via prefix/neighbor-cell lookups (§3); sharding by geography aligns the shard key with the fact that matching is inherently local (§6 below) | [Caching](../../02-building-blocks/caching/README.md) · [Sharding](../../02-building-blocks/databases/sharding/README.md) |
+| **Redis Distributed Lock** | Gives exclusive, short-TTL ownership of a candidate driver during the match attempt | An atomic `SET NX PX` is a simple, well-understood primitive for exactly this "claim exactly one of N concurrent bidders" problem, with the TTL handling the no-response failure mode without extra cleanup logic | [Consistency Models](../../01-foundations/consistency-models/README.md) |
+| **Trip DB** | Durable, ACID-compliant record of trip status transitions from `MATCHED` through `COMPLETED` | A relational store fits well here — status transitions and fare calculation benefit from real transactional guarantees, unlike the ephemeral, high-churn location index | [SQL vs NoSQL](../../02-building-blocks/databases/sql-vs-nosql/README.md) |
+| **Notification Service** | Pushes the trip request to the driver and streams live status/location to the rider during an active trip | A persistent connection (WebSocket) fits better than polling for exactly this kind of low-latency, bidirectional, session-long update stream | [WebSockets](../../08-api-design/websockets/README.md) |
+
+---
+
+## 7. Data Model
 
 ```sql
 -- Trip: the durable record of a matched ride, needs standard ACID semantics
@@ -125,7 +157,7 @@ Redis:  GEOADD driver-locations:{cityShard} {lng} {lat} {driverId}
 
 ---
 
-## 7. API Design
+## 8. API Design
 
 ```
 POST /api/v1/driver/location
@@ -145,7 +177,7 @@ GET /api/v1/rides/{tripId}/status
 
 ---
 
-## 8. Trade-offs & Follow-Up Questions to Anticipate
+## 9. Trade-offs & Follow-Up Questions to Anticipate
 
 | Follow-up | Strong answer direction |
 |---|---|
@@ -156,7 +188,7 @@ GET /api/v1/rides/{tripId}/status
 
 ---
 
-## 9. 60-Second Interview Answer
+## 10. 60-Second Interview Answer
 
 > "The core problem is efficient proximity search — finding available drivers near a rider fast, at a scale of millions of drivers each pinging their location every few seconds. I'd index live driver locations with geohashing, using Redis's built-in GEO commands, querying the rider's cell plus its 8 neighbors to avoid missing drivers just across a cell boundary — and I'd shard that index geographically by city or region, since proximity queries are inherently local and that aligns the shard key with the actual query pattern. To prevent two riders being matched to the same driver simultaneously, I'd use a short-lived distributed lock on the candidate driver before sending the trip request, falling back to the next candidate if the lock is already held — treating the match itself as a consistency-critical operation, unlike the high-frequency location pings, which can tolerate occasional loss."
 

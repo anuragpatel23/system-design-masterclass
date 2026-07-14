@@ -45,9 +45,35 @@ Where `P` = the proportion of the workload that can be parallelized, and `N` = n
 
 **Implication:** if 10% of your workload is inherently serial (e.g., a global sequence generator, a single-leader commit step), your maximum possible speedup is capped at **10x**, no matter how many nodes you throw at it. This is precisely why systems like Twitter's Snowflake ID generator or a single-leader database's write path become the ceiling on scalability — and why senior candidates are expected to identify the serial 10% before proposing "just add more nodes."
 
+### The Universal Scalability Law (Gunther) — what Amdahl's Law leaves out
+
+Amdahl's Law accounts for serial work but assumes the parallel portion scales perfectly with zero coordination cost. In real distributed systems, nodes also have to **talk to each other** — cache invalidation, distributed locks, consensus rounds, retries — and that coordination cost itself grows as you add nodes. The **Universal Scalability Law** adds a second penalty term for exactly this:
+
+```
+Speedup(N) = N / (1 + α(N-1) + βN(N-1))
+```
+Where `α` is the same serialization penalty as Amdahl's `(1-P)`, and `β` is the **coherency/crosstalk penalty** — the cost of nodes coordinating with each other, which grows roughly with the *square* of node count (every node potentially talking to every other node).
+
+**Why this matters more than Amdahl's Law alone:** Amdahl's Law predicts throughput flattens out as N grows. USL predicts throughput can actually **decrease** past some optimal node count, because coordination overhead eventually outgrows the benefit of added parallelism — this is the mathematical explanation for the very real, very common observation that "we added more nodes to the cluster and it got *slower*," usually because of chatty cache-coherency protocols, lock contention, or a consensus algorithm (see [Raft](../../05-distributed-systems/consensus-algorithms/raft/README.md)) whose quorum communication cost rises faster than the useful work being parallelized. Naming USL, not just Amdahl's Law, is what separates "knows the famous formula" from "understands why real clusters have a scaling sweet spot, not just a ceiling."
+
 ---
 
-## 3. Scalability Patterns (the toolbox)
+## 3. Auto-Scaling, Mechanically — and Capacity Planning
+
+"Auto-scaling" is a specific control loop, not a magic switch, and knowing its mechanics is what separates "we auto-scale" from actually being able to reason about cost and failure modes.
+
+- **Reactive scaling (target tracking):** a metric (CPU%, request count per target, custom app metric) is watched, and instance count adjusts to keep it near a target — e.g., "keep average CPU at 60%." Simple, but reacts *after* load has already arrived, so there's an inherent lag equal to (metric collection interval + new-instance boot time + warm-up time).
+- **Step scaling:** adds/removes capacity in discrete steps tied to how far a metric has breached a threshold (e.g., +2 instances if CPU > 70%, +5 if CPU > 90%) — reacts more aggressively to severe spikes than smooth target tracking.
+- **Scheduled scaling:** pre-provision capacity ahead of *known* patterns (a flash sale at 9am, a batch job every night at 2am) — sidesteps reactive scaling's lag entirely because the spike isn't a surprise.
+- **Predictive scaling:** forecasts near-future load from historical patterns (e.g., AWS Predictive Scaling, using time-series forecasting) and pre-provisions ahead of the predicted spike — the closest thing to eliminating cold-start lag for *recurring* traffic shapes, though it's blind to genuinely novel spikes.
+- **Cooldown periods** exist to prevent **flapping** — scaling out, then immediately back in because the new capacity briefly dropped the average metric below threshold, then back out again seconds later. A cooldown enforces a minimum quiet period between scaling actions.
+- **The thundering herd on scale-out:** when N new instances boot simultaneously, they often all hit the same downstream dependency at once (a database connection pool exhausting itself, a cache stampede on cold caches) — a real failure mode where "auto-scaling saved us" is followed immediately by "and then it took down the database," and the fix is staggered warm-up / connection pool limits per instance, not just "add more instances."
+
+**Capacity planning** is the deliberate, non-reactive complement to auto-scaling: load-test the system to find its actual breaking point per instance (not a guess), establish the relationship between a leading metric (RPS, concurrent connections) and resource saturation, and set auto-scaling thresholds *below* that breaking point with enough margin to cover the reaction lag above. A senior answer to "how would you make sure this scales for launch day" names load testing to find the real ceiling, not just "we'd turn on auto-scaling."
+
+---
+
+## 4. Scalability Patterns (the toolbox)
 
 | Pattern | What it solves | Cost |
 |---|---|---|
@@ -62,7 +88,7 @@ Where `P` = the proportion of the workload that can be parallelized, and `N` = n
 
 ---
 
-## 4. Real-World Example: Netflix's Horizontal Scaling of the Video Encoding Pipeline
+## 5. Real-World Example: Netflix's Horizontal Scaling of the Video Encoding Pipeline
 
 Netflix re-encodes every title into dozens of resolution/codec/bitrate combinations (for adaptive bitrate streaming across device types). This workload is **embarrassingly parallel** — each chunk of a video can be encoded independently.
 
@@ -75,7 +101,7 @@ Netflix's approach (as described in their public engineering blog):
 
 ---
 
-## 5. Spring Boot Example: From a Bottlenecked Monolith to a Horizontally Scalable Stateless Service
+## 6. Spring Boot Example: From a Bottlenecked Monolith to a Horizontally Scalable Stateless Service
 
 **The anti-pattern** — storing session state in server memory, which prevents horizontal scaling because a user's second request might hit a different node that doesn't have their session:
 
@@ -155,7 +181,7 @@ services:
 
 ---
 
-## 6. Common Pitfalls (senior interviewers listen for these)
+## 7. Common Pitfalls (senior interviewers listen for these)
 
 - **Confusing scalability with performance.** A system can be fast for one user and still not scale (e.g., a single powerful DB server with no replication). Scalability is about the *shape of the cost curve as load grows*, not the absolute speed at t=0.
 - **Ignoring the database while scaling app servers.** App-tier horizontal scaling is "easy mode." The real interview signal is what you do when the single Postgres primary becomes the bottleneck — read replicas first, then vertical scaling of the primary, then sharding as a last resort (sharding has real cost — cross-shard joins, rebalancing, hot shards).
@@ -164,7 +190,7 @@ services:
 
 ---
 
-## 7. 60-Second Interview Answer
+## 8. 60-Second Interview Answer
 
 > "Scalability means the system's cost and latency scale sub-linearly, or at worst linearly, as load grows — not just that it survives. I'd first separate stateless compute (trivial to scale horizontally with a load balancer) from stateful components like databases (need read replicas for read scale, sharding for write scale). I'd also identify the serial, non-parallelizable part of the workload — per Amdahl's Law, that part caps how much horizontal scaling can ever help, so I'd optimize it directly rather than throwing more nodes at it."
 

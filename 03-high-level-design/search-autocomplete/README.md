@@ -50,38 +50,53 @@ A **trie** is a tree where each node represents a single character, and a path f
 
 ## 4. High-Level Design
 
-```
-  ── Offline / Periodic Build Pipeline (runs every few minutes to hours) ──
-  Search query logs ──▶ Aggregation job: count query frequency per term,
-                          over a recent rolling time window (to reflect
-                          CURRENT trends, not all-time-ever popularity)
-                                 │
-                          Build/rebuild the Trie, annotating each relevant
-                          node with its precomputed top-K completions
-                                 │
-                          Serialize the trie into a compact, loadable format
-                                 │
-                          Distribute to Autocomplete Service instances
-                          (each instance loads the FULL trie into its own
-                          local memory -- this is a read-only, precomputed
-                          artifact, not something queried remotely per request)
+```mermaid
+graph TD
+    subgraph OfflinePipeline["Offline Build Pipeline — runs every few minutes to hours"]
+        Logs[[Search Query Logs]]
+        Aggregator[Aggregation Job<br/>frequency, rolling window]
+        FreqTable[(query_frequency table)]
+        TrieBuilder[Trie Builder<br/>annotate nodes with top-K]
+        Serializer[Serialize Trie]
+    end
 
-  ── Online / Read Path (must be extremely fast) ──
-  Client keystroke ──▶ Autocomplete Service (load balanced across many
-                        stateless-from-a-request-perspective instances,
-                        each holding an identical in-memory trie copy)
-                                 │
-                        O(L) trie traversal to the prefix's node
-                                 │
-                        Return precomputed top-K list directly --
-                        no live ranking/sorting computation needed
-                                 │
-                        Response served entirely from local RAM,
-                        no network hop to a database or even to
-                        a separate cache service
+    LB[Load Balancer]
+
+    subgraph OnlineTier["Online Read Path — Auto Scaling Group"]
+        direction LR
+        Svc1[Instance 1<br/>full trie in local RAM]
+        Svc2[Instance 2<br/>full trie in local RAM]
+        Svc3[Instance N<br/>full trie in local RAM]
+    end
+
+    Client([Client — keystroke, debounced])
+
+    Logs --> Aggregator --> FreqTable --> TrieBuilder --> Serializer
+    Serializer -.->|"atomic swap: distribute new version to every instance"| Svc1
+    Serializer -.-> Svc2
+    Serializer -.-> Svc3
+
+    Client -->|"GET /autocomplete?prefix=..."| LB
+    LB --> Svc1
+    LB --> Svc2
+    LB --> Svc3
+    Svc1 -.->|"O(L) traversal + O(1) top-K read, zero network hops"| Client
+
+    style FreqTable fill:#a8d5ff,stroke:#333
+    style OnlineTier fill:#fff3cd,stroke:#333
 ```
 
-**A crucial architectural point:** because the trie is a read-only, periodically-rebuilt artifact, the best design **loads a full copy of the trie into the local memory of every single Autocomplete Service instance**, rather than centralizing it in one shared remote cache/database that every instance queries over the network. This trades some memory duplication (every instance holds a full copy) for eliminating a network hop entirely from the hottest, most latency-sensitive path in the whole system — a deliberate, explicit choice, and a strong thing to call out unprompted in an interview.
+**Take this as the reference shape of the whole system** — the diagram is drawn to make one fact visually unmistakable: the **online read path never touches a database, a cache service, or even a network call to fetch trie data** — every Autocomplete instance already holds the entire trie in its own local memory, and the only thing arriving from the offline pipeline is a periodic, fully-built replacement copy.
+
+**Offline build pipeline, step by step (runs continuously in the background, never on the request path):**
+1. Raw search query logs feed an **Aggregation Job**, which counts query frequency per term over a recent rolling time window — deliberately a *rolling* window, not all-time-ever counts, so trending terms reflect current, not historical, popularity (§5).
+2. The **Trie Builder** consumes this aggregated frequency data and constructs the trie, annotating each relevant node with its precomputed, already-sorted top-K completions (§3) — all of the ranking work happens here, once, rather than on every single request.
+3. The finished trie is serialized into a compact, loadable format and **distributed to every Autocomplete Service instance**, each of which loads the *entire* trie into its own local memory and performs an **atomic swap** from its old copy to the new one — reads in flight during the swap simply finish against whichever version they started with; nothing ever sees a half-built trie.
+
+**Online read path, step by step (the latency-critical path, optimized to the point of having almost nothing left to optimize):**
+1. A (client-side debounced) keystroke fires `GET /autocomplete?prefix=...` through the **Load Balancer** to any Autocomplete instance — since every instance holds an identical full trie copy, request routing is a pure load-spreading decision with no data-locality constraint at all.
+2. The instance performs an `O(L)` trie traversal down to the prefix's node, then an `O(1)` read of that node's precomputed top-K list — no live sorting, no query, no cache lookup, no network hop beyond the load balancer itself.
+3. The response is returned entirely from local RAM — this is what makes the sub-100ms, ideally sub-50ms latency budget (§1) actually achievable at this request volume.
 
 ---
 
@@ -94,7 +109,19 @@ Pure query-frequency-based ranking has real weaknesses worth naming: it favors a
 
 ---
 
-## 6. Data Model
+## 6. Components Used — What Each Piece Is and Why It's Here
+
+| Component | Role in This Design | Why This Choice, Here Specifically | Deep Dive |
+|---|---|---|---|
+| **Load Balancer** | Distributes keystroke requests across Autocomplete instances | Pure load-spreading with no data-locality concern at all, since every instance holds an identical full trie — any instance can answer any request equally well | [Load Balancers](../../02-building-blocks/load-balancers/README.md) |
+| **Auto Scaling Group (Autocomplete Tier)** | Runs many instances, each holding a complete in-memory trie copy | Scales purely with request volume, not data size per instance — adding an instance means adding another full trie copy, not partitioning anything | [Scalability](../../01-foundations/scalability/README.md) |
+| **In-Memory Trie (per instance)** | Answers every request with an O(L) traversal plus O(1) precomputed top-K read | This is deliberately **not** a shared remote cache — eliminating the network hop entirely from the hottest path in the system is the single biggest latency decision in this whole design (§4) | [Caching](../../02-building-blocks/caching/README.md) |
+| **Aggregation Job** | Periodically computes rolling query-frequency counts from raw search logs | Decoupled entirely from the read path — this can run on whatever schedule keeps trends fresh enough (minutes to hours) without any pressure to be real-time | [Message Queues](../../02-building-blocks/message-queues/README.md) |
+| **Trie Builder / Serializer** | Constructs the next version of the trie offline and packages it for distribution | Building happens fully in the background; the atomic-swap distribution step (§4) is what guarantees zero read-path downtime during a rebuild | [Scalability](../../01-foundations/scalability/README.md) |
+
+---
+
+## 7. Data Model
 
 ```
 -- The trie itself is an in-memory data structure, not a relational table --
@@ -114,7 +141,7 @@ TrieNode {
 
 ---
 
-## 7. API Design
+## 8. API Design
 
 ```
 GET /api/v1/autocomplete?prefix=cat&limit=10
@@ -127,7 +154,7 @@ GET /api/v1/autocomplete?prefix=cat&limit=10
 
 ---
 
-## 8. Trade-offs & Follow-Up Questions to Anticipate
+## 9. Trade-offs & Follow-Up Questions to Anticipate
 
 | Follow-up | Strong answer direction |
 |---|---|
@@ -138,7 +165,7 @@ GET /api/v1/autocomplete?prefix=cat&limit=10
 
 ---
 
-## 9. 60-Second Interview Answer
+## 10. 60-Second Interview Answer
 
 > "The defining constraint is latency, not data volume — this fires on nearly every keystroke, so I need sub-100ms responses at request volume far higher than the underlying full search itself. That rules out a live database query per keystroke, so I'd precompute a trie offline, periodically rebuilt from recent query logs, with each relevant node annotated with its already-ranked top-K completions — turning each request into an O(prefix length) traversal plus an O(1) read of a precomputed list, no live sorting needed. I'd load a full copy of this trie into the local memory of every autocomplete service instance rather than centralizing it behind a network call, trading some memory duplication for eliminating a network hop from the hottest path in the system. To refresh it without downtime, I'd build the new trie fully in the background and atomically swap the reference once ready, so reads never see a half-built trie."
 

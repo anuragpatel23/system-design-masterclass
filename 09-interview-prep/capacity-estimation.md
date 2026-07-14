@@ -19,7 +19,7 @@
 | Same-datacenter round trip | ~0.5 ms | "every service hop costs this before any work" |
 | Cross-continent round trip (e.g., US↔EU) | ~80–150 ms | "why geo-replication & [CDNs](../02-building-blocks/cdn/README.md) exist" |
 
-**Throughput anchors (order-of-magnitude, per node, tuned):** a relational DB sustains roughly **1–10k writes/sec and 10–50k simple reads/sec**; Redis/memcached **~100k+ ops/sec**; Kafka-class log **hundreds of MB/sec per broker**; a stateless app server **~1–10k req/sec**; one server holds **~100k–1M idle WebSocket connections](../08-api-design/websockets/README.md)**. These are *decision thresholds*, not benchmarks — the moment demand exceeds one node's anchor, you've justified sharding/replication/caching.
+**Throughput anchors (order-of-magnitude, per node, tuned):** a relational DB sustains roughly **1–10k writes/sec and 10–50k simple reads/sec**; Redis/memcached **~100k+ ops/sec**; Kafka-class log **hundreds of MB/sec per broker**; a stateless app server **~1–10k req/sec**; one server holds [**~100k–1M idle WebSocket connections**](../08-api-design/websockets/README.md). These are *decision thresholds*, not benchmarks — the moment demand exceeds one node's anchor, you've justified sharding/replication/caching.
 
 **Scale conversions (the arithmetic lubricant):**
 - 1 day ≈ 86,400s — **round to 100k** for mental math (and say you're rounding).

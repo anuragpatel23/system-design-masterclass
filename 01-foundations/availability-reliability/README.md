@@ -55,7 +55,44 @@ Availability ≈ MTBF / (MTBF + MTTR)
 
 ---
 
-## 3. Techniques to Improve Availability
+## 3. SLI, SLO, and SLA — the vocabulary that turns "nines" into a contract
+
+These three terms are frequently used interchangeably, which is itself the interview tell that someone hasn't worked with them for real:
+
+- **SLI (Service Level Indicator):** the actual **measured metric** — e.g., "the percentage of requests in the last 5 minutes that completed in under 300ms with a 2xx status." This is a number you compute from real telemetry.
+- **SLO (Service Level Objective):** the **internal target** for that SLI — e.g., "99.9% of requests complete in under 300ms, measured over a rolling 30 days." This is the number engineering teams design and operate against.
+- **SLA (Service Level Agreement):** an **external, often contractual** commitment to a customer, typically set *looser* than the internal SLO on purpose (e.g., SLO of 99.95%, SLA of 99.9%) — the gap is deliberate slack so that normal operational variance doesn't trigger customer-facing penalty clauses (service credits, refunds) every time the SLO has a slightly rough month.
+
+**The error budget, precisely:** if the SLO is 99.9% over 30 days, the **error budget** is the complementary 0.1% — a concrete, spendable allowance (roughly 43 minutes over 30 days) that the team can consciously spend on risky deploys, planned maintenance, or experiments. When the budget is exhausted, the team's own policy (this is the actual SRE practice, not a suggestion) is to **freeze further risky releases** until the budget replenishes — turning "be more careful" from a vague exhortation into an automatic, metric-driven gate. This is the single most practical piece of SRE theory to be able to state precisely in an interview.
+
+### Durability vs. Availability — a frequently conflated, frequently tested distinction
+
+- **Availability** answers "can I access the system right now."
+- **Durability** answers "once data is written, will it still exist later, even if nothing is currently trying to read it."
+
+A storage system can be **highly durable but temporarily unavailable** — data is safe on disk across multiple replicas, but a network partition means you can't reach it *right now*. AWS S3's own published figures make this distinction concrete: S3 advertises **99.999999999% (eleven nines) durability** for objects, but a **separate, much lower 99.99% availability** SLA — because durability is about surviving media failure across redundant copies, while availability is about the request path being reachable at this instant. Conflating the two ("S3 has eleven nines of uptime") is a specific, common, and easily-caught interview mistake.
+
+---
+
+## 4. Disaster Recovery: RTO and RPO
+
+Beyond day-to-day availability engineering (circuit breakers, health checks, redundancy), **disaster recovery** plans for the low-probability, high-impact event — a full region loss, a catastrophic data corruption, a ransomware event — and it's scoped with two numbers:
+
+- **RTO (Recovery Time Objective):** how long the system is allowed to be *down* before it must be restored — "we must be back online within 4 hours."
+- **RPO (Recovery Point Objective):** how much *data* the organization can afford to lose, measured as time — "we can afford to lose up to 15 minutes of writes" — which directly dictates backup/replication frequency (a nightly backup gives a 24-hour RPO; continuous synchronous replication approaches a near-zero RPO, at a real latency and cost premium).
+
+| DR strategy | Typical RTO | Typical RPO | Cost |
+|---|---|---|---|
+| **Backup & restore** | Hours to days | Hours (since last backup) | Cheapest |
+| **Pilot light** (minimal standby infra, scaled up on failover) | Tens of minutes | Minutes | Low-moderate |
+| **Warm standby** (scaled-down but running replica) | Minutes | Seconds to minutes | Moderate-high |
+| **Active-active (multi-region)** | Near-zero (automatic) | Near-zero | Highest |
+
+**Why this belongs in a system design answer, not just an ops runbook:** "how would you design this for disaster recovery" is really asking you to pick a point on this table and justify it against the business's actual tolerance for downtime and data loss — a bank's ledger has a near-zero RPO requirement; a social media "likes" counter can tolerate losing a few minutes of writes far more cheaply.
+
+---
+
+## 5. Techniques to Improve Availability
 
 | Technique | What it does | Trade-off |
 |---|---|---|
@@ -69,7 +106,7 @@ Availability ≈ MTBF / (MTBF + MTTR)
 
 ---
 
-## 4. Real-World Example: AWS's Multi-AZ / Multi-Region Availability Model
+## 6. Real-World Example: AWS's Multi-AZ / Multi-Region Availability Model
 
 AWS structures its infrastructure into **Regions** (fully independent geographic areas) made of multiple **Availability Zones (AZs)** — physically separate datacenters with independent power, cooling, and networking, connected by low-latency links.
 
@@ -80,7 +117,7 @@ The pattern senior architects borrow from this:
 
 ---
 
-## 5. Spring Boot Example: Circuit Breakers + Health Checks to Cut MTTR
+## 7. Spring Boot Example: Circuit Breakers + Health Checks to Cut MTTR
 
 The following demonstrates the two cheapest, highest-leverage availability levers a senior architect reaches for in an app tier: **fast failure detection** (health checks feeding the load balancer) and **fast isolation of a failing dependency** (circuit breaker, via Resilience4j) so one bad downstream service doesn't cascade into a full outage.
 
@@ -157,7 +194,7 @@ management:
 
 ---
 
-## 6. Common Pitfalls
+## 8. Common Pitfalls
 
 - **Chasing nines without an error budget.** "We need 99.99%" is meaningless without translating it into "we can have 52 minutes of downtime this year — how do we want to spend it (deploys, incidents, maintenance)?"
 - **Treating availability and consistency as the same problem.** A system that returns *stale* data instead of an error is available but not strictly consistent — this is a deliberate trade-off (see [CAP Theorem](../cap-theorem/README.md)), not an accident.
@@ -166,7 +203,7 @@ management:
 
 ---
 
-## 7. 60-Second Interview Answer
+## 9. 60-Second Interview Answer
 
 > "Availability is uptime as a fraction of total time; reliability is the probability of failure-free operation over an interval — a system can be available but wrong, or reliable but frequently offline for maintenance. I'd model availability with `MTBF / (MTBF + MTTR)`, and I'd focus more engineering effort on cutting MTTR — automated health checks, circuit breakers, fast failover — than on chasing a lower MTBF, since detection and recovery speed is usually the cheaper lever. I'd also translate any 'nines' target into an explicit error budget so the team knows how much downtime is available to spend on deploys versus held in reserve for incidents."
 

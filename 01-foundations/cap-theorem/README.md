@@ -52,6 +52,15 @@ The senior-level nuance: DynamoDB doesn't force you into pure AP for every read.
 
 **The lesson:** CAP/PACELC trade-offs don't have to be made once for an entire database — modern systems let you make the trade-off **per query**, and a senior architect's job is knowing which queries need which guarantee, rather than picking one setting globally "to be safe."
 
+### The mechanism underneath "tunable consistency": quorums (N, W, R)
+
+Dynamo-style systems (Cassandra, DynamoDB, Riak) implement tunability with three numbers: **N** (replication factor — how many nodes hold a copy), **W** (how many replicas must acknowledge a write before it's considered successful), **R** (how many replicas are queried on a read, with the highest-timestamp value returned).
+
+- **`W + R > N`** guarantees every read overlaps with at least one replica that has the latest write — this is **quorum consistency**, a practical, tunable way to get strong-ish consistency without requiring *all* N replicas to respond (which would sacrifice availability whenever even one replica is down).
+- Common configurations: `N=3, W=1, R=1` (fastest, weakest — an AP-leaning choice, since either a write or a read can succeed hitting just one live node); `N=3, W=2, R=2` (`W+R=4 > N=3` — quorum consistency, balances latency against guarantee strength); `N=3, W=3, R=1` (strongest write guarantee, most sensitive to any node being unavailable during writes — a CP-leaning choice).
+
+This is the concrete knob DynamoDB's "eventually consistent" vs. "strongly consistent" read setting (discussed above) is implementing under the hood, and naming `W+R > N` specifically, rather than "you can configure consistency," is what separates knowing the concept exists from being able to design with it.
+
 ---
 
 ## 6. Spring Boot Example: Modeling a CP Decision vs an AP Decision in the Same Application

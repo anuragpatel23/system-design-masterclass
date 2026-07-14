@@ -70,35 +70,42 @@ Ledger entries for this ONE transaction:
 
 ## 4. High-Level Design
 
+```mermaid
+graph TD
+    Client([Client])
+    LB[Load Balancer]
+    PaymentAPI[Payment API]
+    IdempotencyStore[(Idempotency Key Store<br/>unique DB constraint)]
+    LedgerDB[(Ledger DB<br/>double-entry, immutable)]
+    Processor[External Payment Processor<br/>Stripe-like]
+    ReconciliationSvc[Reconciliation Service<br/>async, periodic]
+
+    Client -->|"POST /charges + Idempotency-Key"| LB --> PaymentAPI
+    PaymentAPI -->|"1. atomic check-and-insert key"| IdempotencyStore
+    IdempotencyStore -.->|"key already exists: return stored result, stop here"| Client
+    PaymentAPI -->|"2. write PENDING debit/credit pair"| LedgerDB
+    PaymentAPI -->|"3. call processor, same idempotency key"| Processor
+    Processor -.->|"SUCCESS"| PaymentAPI
+    Processor -.->|"FAILURE or TIMEOUT (ambiguous)"| PaymentAPI
+    PaymentAPI -->|"4a. success: update to CONFIRMED"| LedgerDB
+    PaymentAPI -->|"4b. ambiguous: mark UNKNOWN"| LedgerDB
+
+    ReconciliationSvc -->|"periodically query true status"| Processor
+    ReconciliationSvc -->|"resolve UNKNOWN entries to CONFIRMED/FAILED"| LedgerDB
+
+    style IdempotencyStore fill:#ffb3b3,stroke:#333
+    style LedgerDB fill:#a8d5ff,stroke:#333
+    style ReconciliationSvc fill:#f9d976,stroke:#333
 ```
-  Client ──POST /charges (with idempotencyKey)──▶ Payment API
-                                                        │
-                                          Atomic check-and-insert of
-                                          idempotencyKey (unique DB
-                                          constraint) -- if already
-                                          exists, return the STORED
-                                          prior result immediately,
-                                          skip everything below
-                                                        │
-                                          Begin DB transaction:
-                                          write PENDING ledger entries
-                                          (debit/credit pair)
-                                                        │
-                                          Call external Payment
-                                          Processor (Stripe-like)
-                                          to actually move the money
-                                                        │
-                          ┌─────────────────────────────┴────────────────────────┐
-                          │ processor confirms SUCCESS                              │ processor confirms FAILURE
-                          │                                                          │ or TIMES OUT (ambiguous!)
-                          ▼                                                          ▼
-              Update ledger entries to                                  Update ledger entries to FAILED,
-              CONFIRMED; commit transaction                             OR mark PENDING for later
-                                                                         reconciliation if the processor's
-                                                                         response was genuinely ambiguous
-                                                                         (timeout, not a clear failure) --
-                                                                         see Reconciliation below
-```
+
+**Take this as the reference shape of the whole system** — notice the diagram has a deliberate escape hatch: the ambiguous-timeout branch doesn't retry or guess, it simply marks the ledger entry `UNKNOWN` and lets an entirely separate, asynchronous **Reconciliation Service** resolve it later against the processor's own authoritative record — this is what makes the design honest about a real limitation (§5) rather than papering over it.
+
+**Step by step:**
+1. The client's charge request, carrying a client-generated **Idempotency-Key**, reaches the **Payment API** behind the Load Balancer.
+2. The API performs an **atomic check-and-insert** of that key against the **Idempotency Key Store** — if the key already exists (this is a retry of a request already processed), the previously stored result is returned immediately and **nothing below this step runs again** (§2). This atomicity, via a unique database constraint within a single transaction, is what closes the race-condition gap a naive "check then insert" would leave open.
+3. On a genuinely new key, the API writes **`PENDING` debit/credit ledger entries** (§3) *before* calling out to the external processor — the ledger records intent first, so there's always a durable record even if the process crashes mid-call.
+4. The API calls the **external Payment Processor**, passing the *same* idempotency key through to it (§5) — so that even a retried call to the processor itself is recognized as one logical attempt on their side too.
+5. On a clear success or failure response, the ledger entries are updated to `CONFIRMED` or `FAILED` accordingly. On a **timeout or ambiguous response**, the entries are instead marked `UNKNOWN` — deliberately not guessed at — and handed off to the **Reconciliation Service**, which periodically polls the processor's own transaction-status API and resolves any `UNKNOWN` entries against that authoritative source once it becomes available.
 
 ---
 
@@ -115,7 +122,19 @@ The hardest real-world case: the request to the external payment processor **tim
 
 ---
 
-## 6. Data Model
+## 6. Components Used — What Each Piece Is and Why It's Here
+
+| Component | Role in This Design | Why This Choice, Here Specifically | Deep Dive |
+|---|---|---|---|
+| **Load Balancer** | Fronts the Payment API | Standard L7 routing — nothing unusual here, since the correctness-critical work happens entirely below this layer | [Load Balancers](../../02-building-blocks/load-balancers/README.md) |
+| **Idempotency Key Store** | Atomically records whether a given logical charge attempt has already been processed | Must support a genuine atomic check-and-insert (a unique DB constraint within one transaction) — a cache-only or eventually-consistent store here would reopen exactly the race condition idempotency exists to close (§2) | [Message Queues](../../02-building-blocks/message-queues/README.md) (idempotent-consumer pattern) |
+| **Ledger DB** | The immutable, append-only source of truth for every money movement, as balanced debit/credit entries | A relational store with real ACID transactions is essential — this is the one place in the whole system where CP over AP is a non-negotiable, explicit choice (§1) | [CAP Theorem](../../01-foundations/cap-theorem/README.md) · [Transactions & ACID](../../06-databases-deep-dive/transactions-acid/README.md) |
+| **External Payment Processor** | Actually moves money between real financial institutions | Treated as an unreliable, ambiguous-failure-mode dependency by design (§5) — the whole architecture assumes it can time out without a clear answer, not that it will always respond cleanly | — |
+| **Reconciliation Service** | Asynchronously resolves `UNKNOWN` ledger entries against the processor's authoritative transaction history | Runs entirely decoupled from the live charge path — its job is exactly the one thing the synchronous path deliberately refuses to do: guess | [Availability & Reliability](../../01-foundations/availability-reliability/README.md) |
+
+---
+
+## 7. Data Model
 
 ```sql
 CREATE TABLE charges (
@@ -143,7 +162,7 @@ CREATE TABLE ledger_entries (
 
 ---
 
-## 7. API Design
+## 8. API Design
 
 ```
 POST /api/v1/charges
@@ -162,7 +181,7 @@ POST /api/v1/refunds
 
 ---
 
-## 8. Trade-offs & Follow-Up Questions to Anticipate
+## 9. Trade-offs & Follow-Up Questions to Anticipate
 
 | Follow-up | Strong answer direction |
 |---|---|
@@ -173,7 +192,7 @@ POST /api/v1/refunds
 
 ---
 
-## 9. 60-Second Interview Answer
+## 10. 60-Second Interview Answer
 
 > "This is the one system where correctness has to dominate every other concern, including availability — a payment system being briefly unavailable during a partition is a far better outcome than one that's available but double-charges someone. The core mechanism is an idempotency key, generated once per logical charge attempt by the client and checked atomically against a unique constraint before any processing happens, so retries of the same logical attempt are safe no-ops rather than duplicate charges. I'd model money movement as a double-entry ledger — every transaction recorded as balanced debit and credit entries that always sum to zero — rather than a single mutable balance column, because that makes corruption or bugs mechanically detectable and gives a complete, immutable audit trail; corrections like refunds are new balancing entries, never edits to history. The hardest real case is a processor call that times out ambiguously — I wouldn't blindly retry that; I'd pass the same idempotency key to the processor itself, mark the transaction as pending, and resolve it through an asynchronous reconciliation process against the processor's own authoritative transaction record, since perfect real-time certainty about an external system isn't achievable."
 

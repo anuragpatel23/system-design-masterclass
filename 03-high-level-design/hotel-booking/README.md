@@ -28,30 +28,51 @@
 
 ## 3. High-Level Design
 
-```
-  ── Search Path (read-heavy, can tolerate slight staleness) ──
-  Client ──▶ Search Service ──▶ Search Index (Elasticsearch-like, or a
-                                 read-replica-backed cache) -- returns
-                                 candidate available rooms; this data
-                                 can lag the true source of truth by
-                                 seconds without correctness harm, since
-                                 actual availability is RE-VERIFIED at
-                                 booking time regardless
+```mermaid
+graph TD
+    Client([Client])
+    LB[Load Balancer]
 
-  ── Booking Path (must be strongly consistent -- the actual hard problem) ──
-  Client ──▶ Booking Service ──▶ Attempt to ATOMICALLY reserve the
-                                  specific room-night(s) against the
-                                  authoritative Inventory store (see
-                                  Component Deep Dive below)
-                                          │
-                          ┌───────────────┴────────────────┐
-                          │ SUCCESS                          │ FAILURE (already booked
-                          ▼                                  │ by a concurrent request)
-                  Create Booking record;                     ▼
-                  proceed to Payment                  Return "no longer available";
-                  (see Payment System)                client re-searches for
-                                                       alternatives
+    subgraph SearchTier["Search Path — Auto Scaling Group"]
+        SearchSvc[Search Service]
+    end
+    SearchIndex[(Search Index<br/>Elasticsearch / read-replica cache)]
+
+    subgraph BookingTier["Booking Path — Auto Scaling Group"]
+        BookingSvc[Booking Service]
+    end
+    InventoryDB[(Inventory DB<br/>authoritative, versioned rows)]
+    HoldStore[(Hold Store<br/>status=HELD + expiry, or Redis TTL)]
+    PaymentSvc[Payment System]
+    BookingDB[(Bookings DB)]
+
+    Client -->|"GET /search"| LB --> SearchSvc --> SearchIndex
+    SearchIndex -.->|"advisory, can be slightly stale"| Client
+
+    Client -->|"POST /bookings/hold"| LB --> BookingSvc
+    BookingSvc -->|"1. optimistic check against source of truth"| InventoryDB
+    BookingSvc -->|"2. place short-lived hold"| HoldStore
+    HoldStore -.->|holdId, expiresAt| Client
+
+    Client -->|"POST /bookings/confirm"| LB --> BookingSvc
+    BookingSvc -->|"3. verify hold still valid"| HoldStore
+    BookingSvc -->|"4. commit with version check"| InventoryDB
+    BookingSvc -->|"5. charge"| PaymentSvc
+    BookingSvc -->|"6. persist confirmed booking"| BookingDB
+
+    style InventoryDB fill:#ffb3b3,stroke:#333
+    style HoldStore fill:#f9d976,stroke:#333
+    style SearchIndex fill:#a8d5ff,stroke:#333
 ```
+
+**Take this as the reference shape of the whole system** — the diagram is deliberately drawn with two paths that share almost nothing except the Inventory DB, because that separation *is* the design: search can be wrong-but-fast, booking must be right-even-if-slower, and the only place those two philosophies have to reconcile is the moment a hold is placed against the authoritative inventory.
+
+**Search path, step by step:** a client's search query is served entirely from the **Search Index** — a denormalized, read-optimized store (Elasticsearch-like, or cache-backed read replicas) that can lag the true source of truth by seconds without any correctness harm, because nothing here is ever treated as a final answer (§2).
+
+**Booking path, step by step — this is where the actual hard problem lives:**
+1. When a customer selects a room, the **Booking Service** first checks the **Inventory DB** (the authoritative source, never the search index) and, if available, places a **short-lived hold** in the **Hold Store** — this is Strategy C from §4, giving the customer a fixed window to complete payment without another customer simultaneously claiming the same room-night.
+2. The customer proceeds to payment; once ready, `POST /bookings/confirm` re-verifies the hold hasn't expired, then performs the **actual commit** against the Inventory DB using the optimistic-concurrency version check (Strategy B from §4) — this is the single moment in the entire system where a race condition could otherwise cause overbooking, and it's guarded by the version-column check, not by trusting the earlier hold alone.
+3. On success, the **Payment System** is charged and the confirmed booking is persisted to the **Bookings DB**. On a version-check failure (someone else's confirm won the race in between), the customer is told the room is no longer available rather than silently double-booking it.
 
 ---
 
@@ -77,7 +98,21 @@ When a customer proceeds to checkout (before completing payment), place a **shor
 
 ---
 
-## 5. Data Model
+## 5. Components Used — What Each Piece Is and Why It's Here
+
+| Component | Role in This Design | Why This Choice, Here Specifically | Deep Dive |
+|---|---|---|---|
+| **Load Balancer** | Fronts both the Search Service and Booking Service | Two very different consistency requirements (§1) sharing one entry tier — the load balancer itself is agnostic to that distinction; it's purely an L7 routing concern | [Load Balancers](../../02-building-blocks/load-balancers/README.md) |
+| **Auto Scaling Group (Search Tier)** | Runs the Search Service, serving the overwhelming majority of read traffic | Search volume vastly exceeds booking volume (§2) and tolerates staleness, so this tier can scale aggressively and independently without touching the strongly-consistent booking path | [Scalability](../../01-foundations/scalability/README.md) |
+| **Search Index** | A denormalized, read-optimized store of advisory room availability | Deliberately allowed to lag the source of truth — re-verifying every result against it would defeat the point of caching, and correctness is enforced later, at hold/confirm time | [Caching](../../02-building-blocks/caching/README.md) |
+| **Auto Scaling Group (Booking Tier)** | Runs the Booking Service, handling holds and confirmations | Lower volume than search but each request does correctness-critical work (a versioned check-and-write) — scaled and reasoned about independently from the read-heavy search tier | [Scalability](../../01-foundations/scalability/README.md) |
+| **Inventory DB** | The single authoritative source of truth for room-night availability, with a version column per row | This is the one component in the whole design that must be **CP**, not AP (§1) — a stale or incorrect read here directly causes the overbooking bug the entire system exists to prevent | [CAP Theorem](../../01-foundations/cap-theorem/README.md) |
+| **Hold Store** | Temporarily reserves a room-night for a customer mid-checkout, auto-expiring if payment isn't completed | Gives the customer a fixed window to pay without a long-lived lock on the Inventory DB itself — the same short-lived-claim pattern used for [Uber's](../uber/README.md#5-component-deep-dive-preventing-a-driver-from-being-double-matched) driver matching | [Sharding](../../02-building-blocks/databases/sharding/README.md) |
+| **Payment System** | Charges the customer once a hold is confirmed | A separate, dedicated system (see [Payment System](../payment-system/README.md)) — payment has its own idempotency and correctness requirements that shouldn't be tangled into inventory logic | [Payment System](../payment-system/README.md) |
+
+---
+
+## 6. Data Model
 
 ```sql
 -- Room-night inventory: the actual contended resource. One row per room per
@@ -108,7 +143,7 @@ A booking spanning multiple nights requires acquiring holds/updates across **mul
 
 ---
 
-## 6. API Design
+## 7. API Design
 
 ```
 GET /api/v1/search?location=...&checkIn=...&checkOut=...&guests=2
@@ -131,7 +166,7 @@ POST /api/v1/bookings/confirm
 
 ---
 
-## 7. Trade-offs & Follow-Up Questions to Anticipate
+## 8. Trade-offs & Follow-Up Questions to Anticipate
 
 | Follow-up | Strong answer direction |
 |---|---|
@@ -142,7 +177,7 @@ POST /api/v1/bookings/confirm
 
 ---
 
-## 8. 60-Second Interview Answer
+## 9. 60-Second Interview Answer
 
 > "The one invariant this whole system exists to protect is no overbooking, so I'd treat search and booking as two very differently-consistent paths. Search is read-heavy and can be served from a cache or search index that's allowed to be slightly stale, since actual availability is always re-verified at booking time regardless of what search showed. For the booking path itself, I'd use optimistic concurrency control — a version column on each room-night inventory row — for the final commit, since it doesn't hold long-lived locks and performs well under normal contention, combined with a short-lived reservation hold during the checkout and payment flow specifically, so a customer isn't racing against a slow payment provider while another customer could otherwise grab the same room. If sharding the inventory table for scale, I'd shard by room or hotel ID, never by date alone, so a single multi-night booking's rows always land on the same shard and can be updated atomically in one transaction."
 

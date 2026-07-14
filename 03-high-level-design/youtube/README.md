@@ -31,45 +31,57 @@
 
 ## 3. High-Level Design
 
-```
-  1. Upload
-  Client ──(chunked, resumable upload)──▶ Upload Service ──▶ Raw video blob storage
-                                                │                (object storage: S3-like,
-                                                │                 NOT a relational DB)
-                                                ▼
-                                     Publish "video uploaded" event
-                                       to a message queue
-                                                │
-  2. Async Transcoding Pipeline                ▼
-                                     Transcoding Orchestrator
-                                     (breaks video into chunks,
-                                      dispatches parallel encode
-                                      jobs -- see Real-World Example)
-                                                │
-                              ┌─────────────────┼─────────────────┐
-                              ▼                 ▼                 ▼
-                     Encode: 240p          Encode: 720p      Encode: 1080p
-                     (worker fleet,        (worker fleet)    (worker fleet)
-                      horizontally
-                      scaled, disposable)
-                              │                 │                 │
-                              └─────────────────┴─────────────────┘
-                                                │
-                                     Stitch/package into adaptive
-                                     bitrate manifest (e.g., HLS/DASH)
-                                                │
-                                     Store transcoded renditions in
-                                     object storage; update video
-                                     metadata status: READY
-                                                │
-                                     Push/replicate to CDN edge
-                                     locations (see CDN)
+```mermaid
+graph TD
+    Client1([Client — Uploader])
+    LB[Load Balancer]
+    UploadSvc[Upload Service<br/>chunked, resumable]
+    RawStorage[(Raw Video Storage<br/>Object Storage)]
+    MQ[[Message Queue<br/>"video uploaded" event]]
 
-  3. Playback
-  Client ──GET manifest + video chunks──▶ CDN edge (cache hit for popular
-                                            content) ──(miss)──▶ Origin
-                                            object storage
+    subgraph TranscodePipeline["Async Transcoding Pipeline — Auto Scaling / Spot Fleet"]
+        Orchestrator[Transcoding Orchestrator<br/>chunks video, dispatches jobs]
+        Workers["Encode Workers<br/>240p · 720p · 1080p<br/>parallel, disposable"]
+        Stitch[Stitch & Package<br/>HLS/DASH manifest]
+    end
+
+    RenditionStorage[(Transcoded Renditions<br/>Object Storage)]
+    MetadataDB[(Video Metadata DB<br/>status: UPLOADING→PROCESSING→READY)]
+    CDN[CDN<br/>edge-cached renditions]
+    Client2([Client — Viewer])
+
+    Client1 -->|chunked upload| LB --> UploadSvc --> RawStorage
+    UploadSvc -->|publish event| MQ --> Orchestrator
+    Orchestrator -->|dispatch parallel chunk jobs| Workers
+    Workers -->|encoded chunks| Stitch
+    Stitch -->|store renditions| RenditionStorage
+    Stitch -->|"update status: READY"| MetadataDB
+    RenditionStorage -->|push/replicate| CDN
+
+    Client2 -->|"GET manifest + video chunks"| CDN
+    CDN -.->|"cache miss → origin"| RenditionStorage
+
+    style RawStorage fill:#a8d5ff,stroke:#333
+    style RenditionStorage fill:#a8d5ff,stroke:#333
+    style MQ fill:#c9f7d1,stroke:#333
+    style CDN fill:#f9d976,stroke:#333
 ```
+
+**Take this diagram as the base for the whole system** — it's drawn as three loosely-coupled stages (upload, transcode, playback) connected only by durable storage and a queue, deliberately so that a slow or backed-up transcoding pipeline can never block a new upload from being accepted, and a playback request never has to wait on anything happening in the other two stages.
+
+**Upload flow, step by step:**
+1. The client uploads video via a **chunked, resumable** protocol (large files, unreliable networks — resumability matters far more here than in most systems in this vault) to the **Upload Service**, sitting behind the Load Balancer.
+2. The raw file is written directly to **Object Storage**, never to a relational database — video blobs are large, immutable-once-written, and accessed by simple key, which is exactly what object storage is built for.
+3. As soon as the raw upload completes, the Upload Service publishes a **"video uploaded" event** to the Message Queue and returns success to the client immediately — the client sees a "processing" status, not a blocked wait for transcoding to finish (§4).
+
+**Transcoding flow, step by step (fully asynchronous, decoupled from any live user request):**
+1. The **Transcoding Orchestrator** consumes the upload event, splits the source video into small, independently-encodable chunks, and dispatches parallel jobs across a large, horizontally-scaled, often spot/preemptible **Encode Worker** fleet — one of the most cleanly parallelizable workloads in this entire vault (§4's Amdahl's Law connection).
+2. Once every chunk for a given rendition is encoded, the **Stitch & Package** step reassembles them in order into a final adaptive-bitrate manifest (HLS/DASH) — this reassembly is the pipeline's one genuinely serial bottleneck, and it's what actually determines the minimum possible upload-to-available latency.
+3. Finished renditions are written to **Object Storage** and the **Video Metadata DB** status flips to `READY`; renditions are then pushed/replicated out to the **CDN** ahead of viewer demand.
+
+**Playback flow, step by step:**
+1. A viewer's client requests the manifest and video chunks straight from the **CDN** — popular content is almost always a cache hit here.
+2. A cache miss falls through to origin **Object Storage**, and the CDN caches the result for subsequent viewers — this is the hot/cold tiering behavior described in §6.
 
 ---
 
@@ -102,7 +114,20 @@ Unlike most systems in this vault, **storage cost itself** is a primary architec
 
 ---
 
-## 7. Data Model
+## 7. Components Used — What Each Piece Is and Why It's Here
+
+| Component | Role in This Design | Why This Choice, Here Specifically | Deep Dive |
+|---|---|---|---|
+| **Load Balancer** | Fronts the Upload Service, distributing large, long-running upload connections across instances | Health-checked L7 routing; upload traffic is comparatively low-volume but each connection is long-lived, unlike typical short request/response traffic | [Load Balancers](../../02-building-blocks/load-balancers/README.md) |
+| **Object Storage (Raw + Renditions)** | Stores the original uploaded file and every transcoded rendition, addressed by simple key | Video blobs are large, immutable once written, and read by exact key — the textbook fit for object storage over a relational database | [CDN](../../02-building-blocks/cdn/README.md) (storage tiering) |
+| **Message Queue** | Carries the "video uploaded" event from the Upload Service to the Transcoding Orchestrator | Decouples upload acceptance from transcoding entirely — a backed-up pipeline never blocks new uploads, and a crashed orchestrator doesn't lose pending work | [Message Queues](../../02-building-blocks/message-queues/README.md) |
+| **Encode Worker Fleet (Auto Scaling / Spot)** | Transcodes independent video chunks in parallel into every required resolution/codec rendition | Embarrassingly parallel, stateless, and tolerant of individual worker failure (a crashed worker's chunk is just retried) — exactly the profile that benefits from cheap, disposable, preemptible compute | [Scalability](../../01-foundations/scalability/README.md) |
+| **Video Metadata DB** | Tracks each video's processing status (`UPLOADING → PROCESSING → READY`) and searchable metadata | A relational or document store fits well here — status transitions benefit from real consistency, and metadata queries (search, channel listings) need real query flexibility unlike the blob storage | [SQL vs NoSQL](../../02-building-blocks/databases/sql-vs-nosql/README.md) |
+| **CDN** | Serves manifests and video chunks to viewers, edge-cached, with hot/cold tiering behind it | The overwhelming majority of playback traffic should never reach origin storage at all — this is the single highest-leverage component for both latency and origin cost at this scale | [CDN](../../02-building-blocks/cdn/README.md) |
+
+---
+
+## 8. Data Model
 
 ```sql
 CREATE TABLE videos (
@@ -130,7 +155,7 @@ The actual video **bytes never live in a relational database row** — only poin
 
 ---
 
-## 8. API Design
+## 9. API Design
 
 ```
 POST /api/v1/videos/upload-init
@@ -151,7 +176,7 @@ GET /api/v1/videos/{videoId}/manifest
 
 ---
 
-## 9. Trade-offs & Follow-Up Questions to Anticipate
+## 10. Trade-offs & Follow-Up Questions to Anticipate
 
 | Follow-up | Strong answer direction |
 |---|---|
@@ -162,7 +187,7 @@ GET /api/v1/videos/{videoId}/manifest
 
 ---
 
-## 10. 60-Second Interview Answer
+## 11. 60-Second Interview Answer
 
 > "The core challenge here is the transcoding pipeline, not the database — uploaded video needs to be converted into multiple resolutions and codecs for adaptive streaming, and that has to happen asynchronously, since synchronous transcoding in the upload request path would mean users waiting minutes for a response. I'd chunk the video and transcode chunks in parallel across a large, disposable worker fleet — the same embarrassingly-parallel pattern Netflix uses for its encoding pipeline — with a final stitching step that's inherently more sequential and sets the floor on total processing time. For delivery, adaptive bitrate streaming lets the client dynamically pick a rendition based on measured throughput, trading a bit of upfront buffering latency for smooth sustained playback. And because storage cost scales with the number of renditions times upload volume, I'd tier storage — hot, CDN-replicated storage for popular and recent content, cheaper cold storage for the long tail, promoted on-demand if an old video suddenly goes viral again."
 

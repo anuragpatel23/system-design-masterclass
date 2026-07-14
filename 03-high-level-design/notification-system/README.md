@@ -30,45 +30,69 @@
 
 ## 3. High-Level Design
 
-```
-  Any internal service (order, chat, marketing, ...) ──▶ Notification API
-  (e.g., "user 123 just had their order shipped")            │
-                                                     Publish an abstract
-                                                     "notification event"
-                                                     to a message queue
-                                                     (see Message Queues)
-                                                     -- the triggering
-                                                     service's call returns
-                                                     IMMEDIATELY here; it
-                                                     never waits on actual
-                                                     delivery
-                                                             │
-                                              Notification Orchestrator
-                                              (consumes the event)
-                                                             │
-                                              1. Look up user's channel
-                                                 preferences for this
-                                                 notification TYPE
-                                              2. Render templated content
-                                                 (localized, per-channel
-                                                 formatted)
-                                              3. Fan out to one queue
-                                                 PER CHANNEL for each
-                                                 enabled channel
-                                                             │
-                    ┌────────────────────┬───────────────────┼───────────────────┐
-                    ▼                    ▼                   ▼                   ▼
-             Push Queue            SMS Queue            Email Queue      In-App Queue
-                    │                    │                   │                   │
-             Push Worker           SMS Worker           Email Worker     In-App Worker
-             (calls APNs/FCM,      (calls Twilio-       (calls email     (writes to a
-              rate-limited          like provider,       provider API,    notification-
-              per provider          respects carrier     handles bounce   center DB table,
-              quota)                 rate limits)         handling)        read by the app's
-                                                                            notification bell)
+```mermaid
+graph TD
+    Service([Internal Service<br/>order · chat · marketing])
+    LB[Load Balancer]
+    NotifAPI[Notification API]
+    EventQueue[[Event Queue]]
+    Orchestrator[Notification Orchestrator]
+    PrefDB[(Preferences DB)]
+    TemplateDB[(Template Store)]
+
+    PushQueue[[Push Queue]]
+    SMSQueue[[SMS Queue]]
+    EmailQueue[[Email Queue]]
+    InAppQueue[[In-App Queue]]
+
+    PushWorker[Push Worker<br/>rate-limited per provider]
+    SMSWorker[SMS Worker<br/>rate-limited per carrier]
+    EmailWorker[Email Worker<br/>rate-limited per domain]
+    InAppWorker[In-App Worker]
+
+    DedupStore[(Dedup Store<br/>Redis, idempotency keys)]
+    Providers[External Providers<br/>APNs/FCM · Twilio · Email API]
+    InAppDB[(In-App Notifications DB)]
+
+    Service -->|"trigger event"| LB --> NotifAPI
+    NotifAPI -->|"publish, return 202 IMMEDIATELY"| EventQueue --> Orchestrator
+    Orchestrator -->|"1. lookup preferences"| PrefDB
+    Orchestrator -->|"2. render templated content"| TemplateDB
+    Orchestrator -->|"3. fan out, one queue per enabled channel"| PushQueue
+    Orchestrator --> SMSQueue
+    Orchestrator --> EmailQueue
+    Orchestrator --> InAppQueue
+
+    PushQueue --> PushWorker
+    SMSQueue --> SMSWorker
+    EmailQueue --> EmailWorker
+    InAppQueue --> InAppWorker
+
+    PushWorker -->|"4. check dedup key"| DedupStore
+    SMSWorker --> DedupStore
+    EmailWorker --> DedupStore
+
+    PushWorker --> Providers
+    SMSWorker --> Providers
+    EmailWorker --> Providers
+    InAppWorker --> InAppDB
+
+    style EventQueue fill:#c9f7d1,stroke:#333
+    style DedupStore fill:#f9d976,stroke:#333
+    style PushQueue fill:#c9f7d1,stroke:#333
+    style SMSQueue fill:#c9f7d1,stroke:#333
+    style EmailQueue fill:#c9f7d1,stroke:#333
+    style InAppQueue fill:#c9f7d1,stroke:#333
 ```
 
-**The critical design decision: the triggering service publishes an event and returns immediately.** It never synchronously waits for actual delivery through any channel. This directly follows the [Message Queues](../../02-building-blocks/message-queues/README.md) decoupling principle: the order service's job is to record that an order shipped, not to know or care whether a push notification provider is currently slow or down.
+**Take this diagram as the base for the whole system** — notice there are **two separate fan-out stages**, not one: the Orchestrator fans a single event out across channels (one queue per channel type), and each channel's own worker pool independently dispatches to potentially many recipients — this two-stage separation is exactly what lets each channel be rate-limited, scaled, and reasoned about completely independently (§4).
+
+**The critical design decision, step by step:** the triggering service calls `POST /notifications/trigger`, and the **Notification API** publishes an abstract event to the **Event Queue**, returning `202 Accepted` **immediately** — the order service (or chat, or marketing service) never learns or cares whether APNs is currently slow. The **Notification Orchestrator** then, asynchronously and entirely decoupled from that original request:
+1. Looks up the user's channel preferences for this specific notification type in the **Preferences DB**.
+2. Renders the notification content from the **Template Store**, localized to the user's language.
+3. Fans the event out into **separate queues, one per enabled channel** — this is the moment a single logical event becomes multiple physical delivery jobs.
+
+Each channel's dedicated **worker pool** then, independently of every other channel: dequeues its jobs, checks the **Dedup Store** for an idempotency-key hit before doing anything externally visible (§5), and calls its specific **external provider** (APNs/FCM for push, a carrier gateway for SMS, an email API for email) — or, for in-app notifications, simply writes a row to the **In-App Notifications DB** that the app's notification center later reads directly, with no external provider involved at all.
 
 ---
 
@@ -93,7 +117,21 @@ Given at-least-once delivery guarantees throughout the pipeline (a worker crash 
 
 ---
 
-## 6. Data Model
+## 6. Components Used — What Each Piece Is and Why It's Here
+
+| Component | Role in This Design | Why This Choice, Here Specifically | Deep Dive |
+|---|---|---|---|
+| **Load Balancer** | Fronts the Notification API, receiving trigger requests from internal services | Simple stateless L7 routing; the interesting design decisions all happen after this point, not at it | [Load Balancers](../../02-building-blocks/load-balancers/README.md) |
+| **Event Queue** | Decouples the triggering service from all downstream processing entirely | This is what lets `POST /notifications/trigger` return in milliseconds regardless of how backed up any specific channel currently is — the single most important component for the "must not become a single point of failure" requirement (§1) | [Message Queues](../../02-building-blocks/message-queues/README.md) |
+| **Notification Orchestrator** | Consumes raw events, resolves preferences and templates, and performs the first fan-out into per-channel queues | A dedicated stage between "an event happened" and "channel-specific dispatch jobs exist" keeps preference/template logic in exactly one place rather than duplicated per channel worker | [Scalability](../../01-foundations/scalability/README.md) |
+| **Per-Channel Queues (Push/SMS/Email/In-App)** | Buffer channel-specific dispatch jobs independently of one another | This is the mechanism that prevents one constrained channel (typically SMS, due to carrier limits) from throttling a faster one (push) — each queue can back up or drain at its own channel's sustainable rate (§4) | [Message Queues](../../02-building-blocks/message-queues/README.md) |
+| **Per-Channel Rate Limiters** | Cap outbound dispatch rate to match each provider's own imposed limits | SMS carriers and email domains have hard external constraints that have nothing to do with your own infrastructure's capacity — the limiter has to be tuned per provider, not globally | [Rate Limiting](../../02-building-blocks/rate-limiting/README.md) |
+| **Dedup Store (Redis)** | Lets each worker check whether a given idempotency key has already been dispatched before calling the external provider | A fast, TTL-based key-value check fits perfectly here — the check needs to be cheap and low-latency since it sits directly in front of every single external dispatch call | [Caching](../../02-building-blocks/caching/README.md) |
+| **In-App Notifications DB** | Durable, queryable store the app's notification center reads directly | Unlike push/SMS/email, which are fire-and-forget once dispatched, in-app notifications need to be browsable/queryable later, so this is the one channel needing its own persistent, indexed store rather than just a dispatch-and-forget call | [SQL vs NoSQL](../../02-building-blocks/databases/sql-vs-nosql/README.md) |
+
+---
+
+## 7. Data Model
 
 ```sql
 CREATE TABLE notification_preferences (
@@ -127,7 +165,7 @@ CREATE INDEX idx_user_unread ON in_app_notifications (user_id, is_read, created_
 
 ---
 
-## 7. API Design
+## 8. API Design
 
 ```
 POST /api/v1/notifications/trigger   (internal, service-to-service only)
@@ -142,7 +180,7 @@ PUT /api/v1/users/{userId}/notification-preferences
 
 ---
 
-## 8. Trade-offs & Follow-Up Questions to Anticipate
+## 9. Trade-offs & Follow-Up Questions to Anticipate
 
 | Follow-up | Strong answer direction |
 |---|---|
@@ -153,7 +191,7 @@ PUT /api/v1/users/{userId}/notification-preferences
 
 ---
 
-## 9. 60-Second Interview Answer
+## 10. 60-Second Interview Answer
 
 > "The triggering service should never wait on actual delivery — it publishes an abstract notification event and returns immediately, fully decoupled via a message queue. An orchestrator consumes that event, looks up the user's per-channel preferences, renders the content, and fans out into separate queues per channel — push, SMS, email, in-app — each with its own independently-tuned worker pool and rate limiter, because these channels have very different throughput, cost, and failure characteristics; sharing one worker pool across channels would let the slowest, most rate-constrained channel, usually SMS due to carrier limits, throttle the fastest one unnecessarily. Since delivery is at-least-once end to end, every worker needs an explicit idempotency check via a deduplication key before actually calling the external provider, because a duplicate SMS has a real dollar cost and a duplicate push is a real user-experience regression, unlike systems where a duplicate is comparatively harmless."
 

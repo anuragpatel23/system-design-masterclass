@@ -26,6 +26,20 @@ Where `L` = average number of requests in the system, `λ` (lambda) = arrival ra
 
 **The senior-level implication:** if throughput (`λ`) increases while your system's capacity to process concurrent requests (`L`) is fixed (e.g., a fixed-size thread pool or connection pool), latency (`W`) *must* increase to compensate — queueing is mathematically inevitable, not a bug. This is why "just add more requests per second" without also scaling concurrent processing capacity **always** degrades latency — it's not an implementation detail, it's queueing theory.
 
+### The utilization curve: why latency explodes non-linearly as you approach capacity
+
+Modeling a single server as an **M/M/1 queue** (Poisson arrivals, exponential service time, one server) gives a strikingly non-intuitive result for average wait time:
+
+```
+W_queue = ρ / (μ × (1 - ρ))       where ρ (utilization) = λ / μ
+```
+
+`ρ` (rho) is **utilization** — the fraction of capacity currently in use. The critical shape of this curve: as `ρ` approaches 1 (the server approaching 100% busy), the `(1 - ρ)` denominator approaches zero and **wait time approaches infinity** — not linearly, but explosively. A server at 70% utilization might have a perfectly reasonable queueing delay; the *same* server at 90% utilization can have several times that delay, and at 99% the queue is effectively unbounded. **This is the mathematical reason production systems target headroom (commonly 60-70% utilization) rather than running "efficiently" near 100%** — the last 10-20% of utilization is disproportionately expensive in latency terms, and it's exactly the margin auto-scaling (see [Scalability §3](../scalability/README.md)) needs to absorb bursts before this curve turns vertical.
+
+### Coordinated omission — the benchmarking trap that hides exactly the problem you're measuring for
+
+A classic load-testing bug: a naive benchmark tool sends the *next* request only after the *previous* one completes. If a server hiccups and one request takes 5 seconds instead of 50ms, a naive tool simply sends its next request 5 seconds later than it "should" have — quietly **failing to count all the requests that real users would have fired during that stall**, and averaging away exactly the tail-latency event the benchmark exists to catch. This is **coordinated omission** (a term coined by Gil Tene), and it systematically makes measured p99/p99.9 numbers look far better than what real users experience under load. The fix is load-testing tools that issue requests on a **fixed schedule regardless of prior completion** (constant arrival rate, matching how real, uncoordinated users actually behave) — knowing this term by name is a strong, specific signal of hands-on performance-testing experience, not just textbook familiarity with percentiles.
+
 ---
 
 ## 3. Averages Lie: You Must Reason in Percentiles
@@ -40,6 +54,8 @@ A senior candidate who says "average latency is 50ms" without qualifying it has 
 | **p99.9** | 1 in 1000 — at high request volume (e.g., 1M req/day), this is still ~1000 unhappy users/day |
 
 **Why tail latency (p99) matters disproportionately:** at scale, a single user page load often fans out into dozens of backend calls (microservices, DB queries, cache lookups). If each individual call has a p99 of "only" 1%, the **probability that at least one of 20 parallel calls hits its p99** is `1 - (0.99)^20 ≈ 18%` — meaning nearly 1 in 5 *page loads* experience tail latency, even though each individual service looks fine on its own p99. This compounding effect is exactly why companies like Amazon and Google obsess over p99/p99.9 rather than averages — Amazon has publicly noted that every 100ms of added latency measurably costs revenue, and this pain concentrates in the tail, not the median.
+
+**A concrete mitigation, not just a measurement practice:** Google's widely-cited "The Tail at Scale" paper (Dean & Barroso) describes **hedged requests** — if a request hasn't come back within, say, the 95th-percentile expected latency, fire an identical *second* request to a different replica and take whichever response returns first, cancelling the loser. This deliberately trades a small amount of extra load (only the slow tail of requests gets duplicated) for a large cut in the effective p99, since it's now bounded by the *faster* of two independent attempts rather than one. Naming this technique specifically — not just "retry on timeout" — is a strong senior-level signal, since a naive retry-after-full-timeout does nothing for tail latency, while a hedge fired *before* the client-visible deadline does.
 
 ---
 

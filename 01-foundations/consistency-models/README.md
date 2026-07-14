@@ -18,8 +18,18 @@ All operations appear in *some* single global order that all nodes agree on, and
 ### Causal Consistency
 Operations that are causally related (e.g., a comment posted in reply to a specific post) are seen by everyone in the same order. Operations that are *not* causally related (two unrelated users posting at the same time) can be seen in different orders by different observers. This is the model that matches human intuition about conversations and is popular in collaborative and social systems.
 
+**The mechanism: how "causally related" is actually tracked.** A **Lamport timestamp** is a simple logical counter each node increments on every event and attaches to outgoing messages, giving a partial order sufficient to say "A happened-before B" when there's a causal chain between them — but it can't distinguish true causality from coincidence for concurrent, unrelated events. A **vector clock** fixes this by giving each node its own counter *and* tracking every other node's counter it has observed (an array of counters, one per node) — comparing two vector clocks tells you definitively whether one event causally preceded another, or whether they were truly concurrent (neither vector dominates the other). This is the actual data structure the original Dynamo paper used to detect conflicting concurrent writes to the same key, handing genuinely concurrent conflicting versions back to the application (or a last-write-wins policy) to resolve — "causal consistency" isn't a vague promise, it's implemented with a specific, comparable data structure attached to every write.
+
 ### Read-Your-Writes Consistency
 A specific, narrower, and extremely practical guarantee: a user is guaranteed to see their *own* writes in subsequent reads, even if other users might not see that write yet. This is the single most commonly needed consistency guarantee in consumer products (e.g., "I just changed my profile picture, why do I still see the old one?").
+
+Read-your-writes is one of four related **session guarantees** (from Terry et al.'s foundational work on session consistency) that are frequently tested as a group:
+- **Read-your-writes** — a session always sees its own prior writes (defined above).
+- **Monotonic reads** — once a session has seen a value, it will never see an *older* value on a subsequent read, even from a different, lagging replica — without this, a user could refresh a page and see a comment "disappear" because their second request happened to land on a more-stale replica than their first.
+- **Monotonic writes** — a session's writes are applied in the order it issued them, even if they land on different replicas — without this, a "delete account" write issued after an "update email" write could theoretically be applied out of order.
+- **Writes-follow-reads** — a write that happens after a read within a session is guaranteed to be applied *after* the write that produced the value that was read — e.g., if you read a forum post and then reply to it, your reply is guaranteed to be causally ordered after the post you're replying to, everywhere.
+
+**Why grouping them matters:** these four are typically implemented **together** as "session consistency," usually via **sticky routing** (pin a client's session to one replica/region, or track a per-session version/offset like the Spring example below) — naming all four, not just read-your-writes, signals a more complete grasp of what "the user's own experience feels consistent" actually requires.
 
 ### Eventual Consistency
 Given no new writes, all replicas will *eventually* converge to the same value — but with no bound on how long "eventually" takes, and no guarantee about what order intermediate reads see. The weakest useful model; the default in most AP systems.

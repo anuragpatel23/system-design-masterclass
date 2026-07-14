@@ -41,42 +41,62 @@ Assume a mid-large scale service (Bitly-like), not a toy:
 
 ## 3. High-Level Design
 
-```
-                              ┌─────────────┐
-                     write    │             │
-   Client ──POST /shorten──▶  │ API Gateway │
-                              │ (auth, rate │
-   Client ──GET /{code}────▶  │  limiting)  │
-                    read      └──────┬──────┘
-                                     │
-                        ┌────────────┴─────────────┐
-                        │                           │
-                 ┌──────▼──────┐            ┌───────▼───────┐
-                 │  Shortening  │            │   Redirect     │
-                 │   Service    │            │    Service     │
-                 └──────┬───────┘            └───────┬────────┘
-                        │                             │
-                        │                      ┌──────▼───────┐
-                        │                      │  Cache (Redis)│◀── read-through,
-                        │                      │  short→long   │    cache-aside
-                        │                      └──────┬───────┘
-                        │                             │ (miss)
-                 ┌──────▼─────────────────────────────▼───────┐
-                 │         Database (sharded/replicated)        │
-                 │   short_code (PK) → long_url, metadata        │
-                 └────────────────────────────────────────────┘
-                        │
-                 ┌──────▼───────┐
-                 │  ID Generator │  (see Component Deep Dive)
-                 │ (Zookeeper /  │
-                 │  Snowflake /  │
-                 │  KGS service) │
-                 └───────────────┘
+The system splits cleanly into a **write path** (shortening a URL, rare, latency-tolerant) and a **read path** (resolving a redirect, extremely frequent, latency-critical) — nearly every component below exists to serve one of these two paths as cheaply as possible, and the diagram is drawn so you can trace each path with your finger.
+
+```mermaid
+graph TD
+    Client([Client / Browser])
+    CDN[CDN<br/>edge-cached hot redirects]
+    LB[Load Balancer<br/>L7, health-checked]
+
+    subgraph AppTier["App Tier — Auto Scaling Group"]
+        GW[API Gateway<br/>auth · rate limiting · routing]
+        Short[Shortening Service]
+        Redirect[Redirect Service]
+    end
+
+    Cache[(Redis Cache<br/>short_code → long_url)]
+    DB[(Primary Database<br/>sharded by short_code hash)]
+    KGS[ID Generator / KGS<br/>pre-allocated ID ranges]
+    MQ[[Message Queue]]
+    Analytics[(Analytics Store)]
+
+    Client -->|"POST /shorten (write)"| CDN
+    Client -->|"GET /{code} (read)"| CDN
+    CDN -->|cache miss / non-cacheable| LB
+    LB --> GW
+    GW -->|write path| Short
+    GW -->|read path| Redirect
+
+    Short -->|1. reserve ID| KGS
+    Short -->|2. persist mapping| DB
+
+    Redirect -->|1. check cache| Cache
+    Cache -.->|hit: return immediately| Client
+    Cache -->|2. miss: query| DB
+    DB -.->|3. populate cache| Cache
+
+    Redirect -.->|async click event| MQ
+    MQ --> Analytics
+
+    style Cache fill:#f9d976,stroke:#333
+    style DB fill:#a8d5ff,stroke:#333
+    style MQ fill:#c9f7d1,stroke:#333
 ```
 
-**Read path (the hot path — optimize this first):** `GET /{code}` → Redirect Service → check Redis cache → on hit, return `301`/`302` redirect immediately; on miss, query the database, populate cache, then redirect.
+**Take this diagram as the base for reasoning about the whole system** — every box is something you should be able to justify removing or keeping if an interviewer pushes on it, and every arrow is a network hop with its own latency and failure-mode implications.
 
-**Write path:** `POST /shorten` → Shortening Service → obtain a unique ID (from the ID Generator component) → encode it → persist `{short_code, long_url}` → return the short URL to the client.
+**Read path, walked through step by step (the hot path — optimize this first):**
+1. A client clicks a short link — `GET /{code}` first hits the **CDN**. Extremely popular links (a viral tweet's link) can be served straight from the CDN's edge cache without ever reaching origin infrastructure — this is the single biggest latency and load win available, because it means the busiest links cost you the least.
+2. A CDN miss reaches the **Load Balancer**, which health-checks the App Tier and distributes the request to a healthy instance — see [Load Balancers](../../02-building-blocks/load-balancers/README.md) for L4 vs L7 mechanics; this workload is simple HTTP so an L7 load balancer (path/host-based routing isn't even required here, but TLS termination and health checks are) is the natural fit.
+3. The **Redirect Service** (a stateless instance in the Auto Scaling Group) checks **Redis** for `short_code → long_url`. A cache hit returns the `301`/`302` immediately — this is the request that should dominate your latency budget reasoning, since it's the overwhelming majority of traffic.
+4. A cache miss falls through to the **Database**, which is authoritative. The result is written back into Redis (cache-aside — see [Caching](../../02-building-blocks/caching/README.md)) before the redirect is returned, so the *next* request for that code is a cache hit.
+5. Independently of the response, the Redirect Service emits a lightweight **click event** onto a **Message Queue**, consumed asynchronously into an analytics store — deliberately kept off the critical path so a slow analytics pipeline can never add latency to a redirect (see the hot-row discussion in §6).
+
+**Write path, walked through step by step:**
+1. `POST /shorten` reaches the same Load Balancer → API Gateway → **Shortening Service**.
+2. The Shortening Service asks the **ID Generator (KGS)** for a unique ID (see §4 for why this component exists and how it avoids becoming a bottleneck), base62-encodes it into a short code.
+3. It persists `{short_code, long_url}` to the **Database** and returns the short URL to the client. Note there's deliberately **no cache write here** — the code doesn't need to be cached until it's actually read for the first time, which cache-aside handles naturally on the next redirect.
 
 ---
 
@@ -104,7 +124,24 @@ Generate a random 7-character base62 string, check the database for a collision,
 
 ---
 
-## 5. Data Model
+## 5. Components Used — What Each Piece Is and Why It's Here
+
+Every box in the §3 diagram is a deliberate choice, not a default. This table exists so you can defend each one individually if an interviewer asks "why did you put that there?"
+
+| Component | Role in This Design | Why This Choice, Here Specifically | Deep Dive |
+|---|---|---|---|
+| **CDN** | Edge-caches responses for extremely hot short codes so the busiest redirects never reach origin infrastructure at all | A tiny fraction of links (viral shares) generate a disproportionate share of traffic — the classic long-tail/hot-key shape — so caching at the edge, closest to the reader, cuts both latency and origin load precisely where it matters most | [CDN](../../02-building-blocks/cdn/README.md) |
+| **Load Balancer** | Distributes both read and write traffic across the stateless App Tier, health-checks instances, terminates TLS | L7 is the right layer since this is plain HTTP with no need for non-HTTP protocol support; health checks are what let the Auto Scaling Group add/remove instances without a human updating a target list | [Load Balancers](../../02-building-blocks/load-balancers/README.md) |
+| **Auto Scaling Group (App Tier)** | Runs the API Gateway, Shortening Service, and Redirect Service as stateless, horizontally scalable instances | The service layer holds no session state (every request is fully self-contained), which is exactly the precondition that makes horizontal auto-scaling safe and simple — see the stateless-service discipline in [Scalability](../../01-foundations/scalability/README.md) | [Scalability](../../01-foundations/scalability/README.md) |
+| **Redis Cache** | Holds the hot `short_code → long_url` mapping in memory, serving the overwhelming majority of read traffic without touching the database | Reads outnumber writes ~100:1 (§2) — a cache-aside pattern in front of the database is the single highest-leverage component in this entire design, since it's what keeps redirect latency low regardless of database load | [Caching](../../02-building-blocks/caching/README.md) |
+| **Primary Database** | The authoritative store of every `short_code → long_url` mapping; source of truth on a cache miss | A relational database is sufficient and preferable here — the access pattern is simple exact-match lookups with no complex queries, and ~40 writes/sec (§2) is trivial for a single well-indexed instance; shard by `short_code` hash only once genuinely necessary | [SQL vs NoSQL](../../02-building-blocks/databases/sql-vs-nosql/README.md) · [Sharding](../../02-building-blocks/databases/sharding/README.md) |
+| **ID Generator / KGS** | Hands out globally unique, pre-allocated ID ranges to app server instances so short-code generation never contends on a single counter | Removes the write path's only real coordination point without over-engineering toward a fully coordination-free Snowflake-style generator this system's actual load doesn't justify (§4) | [Scalability](../../01-foundations/scalability/README.md) |
+| **Message Queue** | Carries click events off the latency-critical redirect path to be aggregated asynchronously | Decouples "return the redirect fast" from "count this click somewhere" — a slow or temporarily-down analytics pipeline must never be able to add latency, or an outage, to a redirect | [Message Queues](../../02-building-blocks/message-queues/README.md) |
+| **Analytics Store** | Aggregates click counts, referrers, and geography from the queue, entirely separate from the low-latency serving path | A write-heavy, append-friendly store (or even a batch/OLAP system) is a better fit here than bolting analytics onto the same row-per-link table the redirect path reads from | [Message Queues](../../02-building-blocks/message-queues/README.md) |
+
+---
+
+## 6. Data Model
 
 ```sql
 CREATE TABLE url_mapping (
@@ -122,7 +159,7 @@ CREATE INDEX idx_long_url_hash ON url_mapping (md5(long_url)); -- for dedup look
 
 ---
 
-## 6. API Design
+## 7. API Design
 
 ```
 POST /api/v1/shorten
@@ -139,7 +176,7 @@ GET /{shortCode}
 
 ---
 
-## 7. Trade-offs & Follow-Up Questions to Anticipate
+## 8. Trade-offs & Follow-Up Questions to Anticipate
 
 | Follow-up | Strong answer direction |
 |---|---|
@@ -151,7 +188,7 @@ GET /{shortCode}
 
 ---
 
-## 8. 60-Second Interview Answer
+## 9. 60-Second Interview Answer
 
 > "This system is read-heavy — reads outnumber writes by roughly 100:1 — so I'd optimize the redirect path first: cache-aside with Redis in front of the database, keyed by short code. For generating unique codes, I'd avoid hashing the long URL due to collision handling overhead, and instead base62-encode IDs from a Key Generation Service that hands out pre-allocated ID ranges to app servers, avoiding a single sequence becoming a write bottleneck, while being right-sized for the estimated ~40 writes/sec rather than reaching for a fully coordination-free Snowflake-style generator that this scale doesn't justify. I'd shard the database by short code hash if it ever needs to scale past a single instance, since lookups are always exact-match. And I'd deliberately use 302 redirects instead of 301, since 301s get cached by browsers and silently kill click analytics."
 

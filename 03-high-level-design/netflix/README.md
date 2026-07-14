@@ -29,42 +29,64 @@
 
 ## 3. High-Level Design
 
-```
-  ── Content Ingestion (comparatively low volume, high value per asset) ──
-  Studio/licensing content ──▶ Encoding pipeline (same parallel-chunk
-                                 transcoding pattern as YouTube) ──▶
-                                 Multiple resolution/codec renditions
-                                 stored in origin storage
-                                       │
-                                 Pre-position (push) popular/anticipated
-                                 content to CDN edge caches AHEAD of
-                                 demand (see CDN: push vs pull) --
-                                 feasible here because the catalog is
-                                 small and demand is more predictable
-                                 than YouTube's long tail
+```mermaid
+graph TD
+    subgraph Ingestion["Content Ingestion — low volume, high value per asset"]
+        Studio([Studio / Licensed Content])
+        EncodePipeline[Encoding Pipeline<br/>parallel chunk transcoding]
+        Origin[(Origin Storage<br/>multi-resolution renditions)]
+    end
 
-  ── Playback ──
-  Client ──▶ Playback API (auth, resume position lookup) ──▶
-             CDN edge (near-certain cache hit for popular content,
-             due to pre-positioning above) ──▶ adaptive bitrate
-             chunk delivery, client adjusts quality based on
-             measured throughput (see Latency vs Throughput)
+    OpenConnect[Open Connect<br/>ISP-embedded CDN appliances]
 
-  ── Personalization (offline, precomputed) ──
-  Viewing history events ──▶ stream processing / batch ML pipeline
-                              (runs periodically, NOT per-page-load)
-                                       │
-                              Precomputed per-user recommendation
-                              rows written to a fast key-value
-                              store (e.g., Cassandra/DynamoDB),
-                              keyed by user/profile ID
-                                       │
-  Client loads home page ──▶ Home Page Service ──▶ single fast
-                              key-value lookup of PRECOMPUTED
-                              recommendations -- no expensive
-                              real-time ML inference in the
-                              read path
+    subgraph PlaybackTier["Playback — Auto Scaling Group"]
+        Client([Client Device])
+        LB[Load Balancer]
+        PlaybackAPI[Playback API<br/>auth · resume-position lookup]
+    end
+
+    ProgressDB[(Viewing Progress DB<br/>read-your-writes consistent)]
+
+    subgraph PersonalizationPipeline["Personalization — offline, precomputed"]
+        Events[[Viewing History Events]]
+        MLPipeline[Batch / Stream ML Pipeline<br/>runs periodically, NOT per page-load]
+        RecoStore[(Recommendation Store<br/>Cassandra/DynamoDB, pure key-value)]
+    end
+
+    HomeSvc[Home Page Service]
+
+    Studio --> EncodePipeline --> Origin
+    Origin -->|"pre-position (push), ahead of demand"| OpenConnect
+
+    Client -->|"request title"| LB --> PlaybackAPI
+    PlaybackAPI -->|"read/write resume position"| ProgressDB
+    PlaybackAPI -->|manifest request| OpenConnect
+    OpenConnect -.->|"adaptive-bitrate chunks, near-certain cache hit"| Client
+
+    Client -->|GET /home| LB --> HomeSvc
+    HomeSvc -->|"single fast KV lookup, no live inference"| RecoStore
+    Events --> MLPipeline --> RecoStore
+
+    style OpenConnect fill:#f9d976,stroke:#333
+    style RecoStore fill:#a8d5ff,stroke:#333
+    style ProgressDB fill:#ffb3b3,stroke:#333
 ```
+
+**Take this diagram as the base for the whole system** — notice it's really three loosely-coupled subsystems that share almost no infrastructure with each other: ingestion feeds Open Connect asynchronously and out-of-band from any live request; playback reads from Open Connect and the Progress DB; personalization runs entirely offline and only meets the live path at one single, cheap key-value read. That separation is deliberate and is the main architectural idea worth narrating.
+
+**Ingestion flow (rare, high-value, not latency-sensitive):**
+1. Licensed/studio content enters the **Encoding Pipeline**, which transcodes it into multiple resolution/codec renditions in parallel (the same chunked-transcoding pattern used in [YouTube](../youtube/README.md)) and writes the results to **Origin Storage**.
+2. Because the catalog is comparatively small and demand is predictable, Netflix **proactively pushes** anticipated-popular renditions to **Open Connect** appliances embedded inside ISP networks *ahead of demand*, typically during off-peak hours — see §5 for why this push model is economically justified here specifically.
+
+**Playback flow (the latency-critical path):**
+1. A client requests a title; the **Playback API** (behind the Load Balancer, running in an Auto Scaling Group) authenticates the request and looks up the user's resume position in the **Progress DB**.
+2. It returns a manifest pointing at chunk URLs served from **Open Connect** — because of the pre-positioning in the ingestion flow, this is a near-certain cache hit close to the user, often on hardware physically inside their own ISP.
+3. The client streams adaptive-bitrate chunks directly from Open Connect, continuously adjusting requested quality based on measured throughput (see [Latency vs Throughput](../../01-foundations/latency-vs-throughput/README.md)) — the Playback API is out of this loop entirely once the manifest is handed over, which is exactly why it can stay cheap and stateless.
+
+**Personalization flow (fully decoupled from any live request):**
+1. Viewing history events stream continuously into a **batch/near-real-time ML pipeline**, which periodically recomputes each profile's ranked recommendation rows.
+2. Results are written to a pure key-value **Recommendation Store**, keyed by profile and row category — never a live database query, never live model inference.
+3. When a client loads the home page, the **Home Page Service** does exactly one fast key-value lookup — the entire, expensive computation happened long before this request existed (§4).
 
 ---
 
@@ -90,7 +112,21 @@ Netflix's publicly documented approach goes a step further than using a third-pa
 
 ---
 
-## 6. Data Model
+## 6. Components Used — What Each Piece Is and Why It's Here
+
+| Component | Role in This Design | Why This Choice, Here Specifically | Deep Dive |
+|---|---|---|---|
+| **Load Balancer** | Distributes Playback API and Home Page Service traffic across stateless instances | Both services are simple stateless HTTP behind health-checked L7 routing; no special protocol needs since the heavy chunk delivery is entirely offloaded to Open Connect, not proxied through here | [Load Balancers](../../02-building-blocks/load-balancers/README.md) |
+| **Auto Scaling Group (Playback & Home Page Tiers)** | Runs the Playback API and Home Page Service, scaling with concurrent viewer count through the day's viewing curve | Both services do lightweight work per request (an auth check, a resume-position lookup, or a single KV read) — the expensive work happens elsewhere (encoding, ML), so this tier scales cheaply and horizontally with pure request volume | [Scalability](../../01-foundations/scalability/README.md) |
+| **Open Connect (Netflix's own CDN)** | Stores pre-positioned video renditions physically inside ISP networks and serves the actual adaptive-bitrate chunk stream directly to clients | A generic third-party CDN's pull-based, reactive caching model is a worse fit than a **push**-based, purpose-built one once catalog size and demand predictability make pre-positioning cost-effective (§5) | [CDN](../../02-building-blocks/cdn/README.md) |
+| **Encoding Pipeline** | Transcodes ingested content into the full set of resolution/codec renditions needed for adaptive bitrate streaming | A batch, parallelizable, non-latency-sensitive workload — ingestion volume is low and value-per-asset is high, the opposite traffic shape from the playback path | [YouTube](../youtube/README.md) (same transcoding pattern) |
+| **Viewing Progress DB** | Stores per-profile resume position, read and written on nearly every playback session | Needs a **read-your-writes** consistency guarantee specifically (§6) — a stale resume position is immediately, jarringly visible to the user in a way almost nothing else in this system is | [Consistency Models](../../01-foundations/consistency-models/README.md) |
+| **Batch/Stream ML Pipeline** | Periodically recomputes each profile's ranked recommendation rows from viewing history events | Deliberately decoupled from the read path entirely — running this per-page-load at hundreds of millions of DAU would be prohibitively expensive; a periodic refresh trades some staleness (invisible to users) for enormous cost savings | [Caching](../../02-building-blocks/caching/README.md) (computation-result caching) |
+| **Recommendation Store (KV)** | Serves the Home Page Service's single lookup per page load — precomputed rows, no query logic at read time | A pure key-value shape is chosen deliberately over a relational store, since the read pattern is always an exact-match lookup by profile ID with no joins or filtering needed | [SQL vs NoSQL](../../02-building-blocks/databases/sql-vs-nosql/README.md) |
+
+---
+
+## 7. Data Model
 
 ```sql
 -- Catalog metadata: comparatively small, relatively static, cacheable aggressively
@@ -122,7 +158,7 @@ CREATE TABLE viewing_progress (
 
 ---
 
-## 7. API Design
+## 8. API Design
 
 ```
 GET /api/v1/home?profileId={id}
@@ -139,7 +175,7 @@ PUT /api/v1/profiles/{profileId}/progress
 
 ---
 
-## 8. Trade-offs & Follow-Up Questions to Anticipate
+## 9. Trade-offs & Follow-Up Questions to Anticipate
 
 | Follow-up | Strong answer direction |
 |---|---|
@@ -150,7 +186,7 @@ PUT /api/v1/profiles/{profileId}/progress
 
 ---
 
-## 9. 60-Second Interview Answer
+## 10. 60-Second Interview Answer
 
 > "Netflix's catalog is comparatively small and predictable compared to something like YouTube, which shifts the hard problem away from ingestion and toward global delivery and personalization at read time. Recommendations are precomputed offline by a batch or streaming pipeline and stored as a simple key-value lookup per user profile, because running live ML inference on every home-page load at hundreds of millions of users isn't feasible — this is the caching principle taken to an extreme, caching a computation's result rather than a query's result. For delivery, because the catalog and demand are predictable, Netflix can afford to proactively push content to edge and even ISP-embedded storage ahead of demand rather than only reacting to cache misses, which is exactly why they built their own purpose-built CDN, Open Connect, rather than relying solely on a generic third-party one. I'd also flag that viewing-progress data needs a much stronger consistency guarantee than recommendations — read-your-writes across devices — since resume-position staleness is immediately obvious to a user in a way recommendation staleness never is."
 

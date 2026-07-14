@@ -18,14 +18,36 @@
 - Pros: true bidirectionality with lowest per-message latency/overhead — the correct tool for chat, multiplayer games, collaborative editing, high-frequency telemetry.
 - Cons: **you now own a stateful connection layer**, and that's the real cost — see §2.
 
-## 2. The real interview content: what 1M+ persistent connections force on your architecture
+## 2. The WebSocket protocol, mechanically
+
+A WebSocket connection is established through an **HTTP Upgrade handshake** — this is the concrete mechanism behind status code `101 Switching Protocols` (see [HTTP Fundamentals §2](../http-fundamentals/README.md)):
+
+```
+GET /chat HTTP/1.1
+Host: example.com
+Upgrade: websocket
+Connection: Upgrade
+Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==
+Sec-WebSocket-Version: 13
+
+HTTP/1.1 101 Switching Protocols
+Upgrade: websocket
+Connection: Upgrade
+Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=
+```
+
+`Sec-WebSocket-Key`/`Accept` is a handshake-integrity check (the server hashes the client's nonce with a fixed magic string to prove it actually understood the WebSocket protocol, not just echoed headers). Once this handshake completes, **the same underlying TCP connection stops being HTTP** — it becomes a raw channel carrying **WebSocket frames**: small binary or text messages, each with a lightweight frame header (a few bytes: opcode indicating text/binary/close/ping/pong, payload length, and for client→server frames, an XOR mask required by the spec to prevent certain proxy cache-poisoning attacks). There is no per-message HTTP header overhead the way there would be re-issuing HTTP requests — this minimal per-frame cost is exactly what gives WebSockets their low per-message latency advantage over polling.
+
+Because it's one persistent TCP connection, WebSockets inherit **all of TCP's properties** discussed in [Networking Fundamentals §2](../networking-fundamentals/README.md) — in-order delivery, reliability, and also head-of-line blocking: a single lost packet stalls every WebSocket message queued behind it until retransmission completes, something worth naming when comparing WebSockets to a hypothetical QUIC-based equivalent.
+
+## 3. The real interview content: what 1M+ persistent connections force on your architecture
 
 - **Stateful servers in a stateless world.** Every design in this vault scales app servers by making them stateless behind a [load balancer](../../02-building-blocks/load-balancers/README.md). A WebSocket breaks that: the connection *lives* on one specific server. Consequences: (1) LB must be L4/connection-aware, and "least connections" beats round-robin; (2) **deploys become disruptive** — restarting a server drops its 500k connections, so you need connection draining and client reconnect-with-jitter (see [Deployment Patterns](../../07-microservices/deployment-patterns/README.md) and [Resilience](../../07-microservices/resilience-patterns/README.md) — a mass reconnect is a self-inflicted thundering herd); (3) capacity math changes — a tuned server holds ~100k–1M mostly-idle connections (memory + FD limits, epoll), so 100M connected users ≈ hundreds of connection servers *before any message throughput*.
 - **The routing problem (the key design step):** user A (connected to server 17) messages user B (connected to server 942). Server 17 must find B's server. Standard answer: a **connection registry** (`user_id → server`, in Redis or a [service-discovery](../../07-microservices/service-discovery/README.md)-like store) maintained on connect/disconnect, plus a **pub/sub backplane** ([message queue](../../02-building-blocks/message-queues/README.md) or Redis pub/sub) so the sending server publishes and B's server — subscribed to B's channel or its own server-topic — delivers. This registry+backplane pair is the heart of every chat design ([WhatsApp](../../03-high-level-design/whatsapp/README.md)).
 - **Offline/missed messages:** the socket is transport, not storage — durable delivery means persisting messages and replaying on reconnect (sequence numbers / `Last-Event-ID` semantics), never assuming the socket delivered.
 - **Heartbeats:** TCP half-open connections lie; ping/pong frames detect dead clients and keep NAT/LB idle timeouts from silently killing connections.
 
-## 3. Decision framework
+## 4. Decision framework
 
 | Use case | Choice | Why |
 |---|---|---|
@@ -37,11 +59,11 @@
 
 **Senior rule of thumb:** *use the weakest primitive that satisfies the interaction pattern* — SSE where one-way suffices, WebSockets only when duplex is real, and platform push for closed apps. Jumping straight to WebSockets for a dashboard signals not having operated the stateful fleet.
 
-## 4. Real-world reference
+## 5. Real-world reference
 
 **WhatsApp** famously ran ~1–2M+ connections per server (Erlang/FreeBSD tuning) — the existence proof for the per-server connection math. **Twitch chat / Slack** are registry+backplane architectures at scale. **Stock tickers and news feeds** (one-way fan-out) are classic SSE. Each maps to a row of the table above.
 
-## 5. Common pitfalls
+## 6. Common pitfalls
 
 - Choosing WebSockets for one-way updates "because real-time" — SSE is operationally an order of magnitude simpler.
 - Designing the socket layer but not the **routing** (registry + backplane) — the actual hard part.
@@ -49,8 +71,8 @@
 - Forgetting deploys: rolling a 200-server connection fleet without draining = a self-inflicted outage every release.
 - Assuming the connection = delivery — durable messaging still needs persistence + acks + replay.
 
-## 6. 60-Second Interview Answer
+## 7. 60-Second Interview Answer
 
 > "Four options in increasing capability: short polling — simple but latency equals the poll interval and a million clients polling every five seconds is two hundred thousand QPS of mostly-empty responses; long polling — hold the request until data arrives, near-real-time over plain HTTP, the classic pre-WebSocket fallback; SSE — one long-lived HTTP stream, server-to-client only, with automatic reconnect and resume via Last-Event-ID, operationally simple because it's still just HTTP; and WebSockets — a full-duplex persistent channel after an HTTP upgrade, lowest per-message overhead, the right tool for chat and anything interactive. The rule is to use the weakest primitive that fits: SSE for one-way feeds and dashboards, WebSockets only when bidirectionality is real, platform push for closed mobile apps. The architectural cost of WebSockets is statefulness: connections pin to servers, so I need least-connection L4 balancing, connection draining plus jittered reconnects for deploys, heartbeats to kill ghosts — and crucially a routing layer: a Redis registry mapping user to connection server plus a pub/sub backplane so a message from a user on server A reaches its recipient on server B. And the socket is transport, not storage — durable delivery means persist, ack, and replay on reconnect."
 
-**Related:** [WhatsApp](../../03-high-level-design/whatsapp/README.md) · [Message Queues](../../02-building-blocks/message-queues/README.md) · [Load Balancers](../../02-building-blocks/load-balancers/README.md) · [Notification System](../../03-high-level-design/notification-system/README.md) · [Resilience Patterns](../../07-microservices/resilience-patterns/README.md)
+**Related:** [HTTP Fundamentals](../http-fundamentals/README.md) · [Networking Fundamentals — OSI, TCP, UDP](../networking-fundamentals/README.md) · [WhatsApp](../../03-high-level-design/whatsapp/README.md) · [Message Queues](../../02-building-blocks/message-queues/README.md) · [Load Balancers](../../02-building-blocks/load-balancers/README.md) · [Notification System](../../03-high-level-design/notification-system/README.md) · [Resilience Patterns](../../07-microservices/resilience-patterns/README.md)

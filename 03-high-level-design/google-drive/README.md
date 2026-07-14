@@ -40,46 +40,47 @@ Rather than treating a file as one indivisible blob, split every file into **fix
 
 ## 4. High-Level Design
 
+```mermaid
+graph TD
+    Client([Desktop Sync Agent])
+    LB[Load Balancer]
+
+    subgraph SyncTier["Sync/Metadata Tier — Auto Scaling Group"]
+        SyncSvc[Sync Service]
+        MetadataSvc[Metadata Service]
+    end
+
+    MetadataDB[(File Metadata DB<br/>versions, chunk hash lists)]
+    ChunkStorage[(Chunk Storage<br/>content-addressed object storage)]
+    MQ[[Message Queue<br/>"file changed" event]]
+    OtherDevices([Other Registered Devices])
+
+    Client -->|"1. local file change detected"| Client
+    Client -->|"2. POST /sync-check (local chunk hashes)"| LB --> SyncSvc
+    SyncSvc -->|"3. diff against current version"| MetadataDB
+    MetadataDB -.->|"chunksNeeded: [...]"| Client
+
+    Client -->|"4. PUT only the changed chunks"| ChunkStorage
+    Client -->|"5. POST /commit-version"| LB --> MetadataSvc
+    MetadataSvc -->|"6. update version record"| MetadataDB
+    MetadataSvc -->|"7. publish change event"| MQ
+    MQ -.->|notify| OtherDevices
+    OtherDevices -->|"8. diff + pull only missing chunks"| ChunkStorage
+
+    style ChunkStorage fill:#a8d5ff,stroke:#333
+    style MetadataDB fill:#f9d976,stroke:#333
+    style MQ fill:#c9f7d1,stroke:#333
 ```
-  Client (Desktop Sync Agent) ──▶ File Watcher detects local change
-                                          │
-                                  Split changed file into chunks,
-                                  compute SHA-256 hash per chunk
-                                          │
-                                  Compare against LOCAL cache of
-                                  previously-synced chunk hashes
-                                  for this file
-                                          │
-                          ┌───────────────┴────────────────┐
-                          │ chunk hash unchanged             │ chunk hash is NEW/changed
-                          ▼                                  ▼
-                  Skip -- chunk already                Upload ONLY this chunk to
-                  synced, no upload needed              Chunk Storage Service
-                                                                │
-                                                        Content-addressed object
-                                                        storage: key = chunk hash
-                                                        (natural deduplication --
-                                                        if hash already exists in
-                                                        storage, skip the actual
-                                                        write, just reference it)
-                                                                │
-                                                        Update file's Metadata
-                                                        Service record: new
-                                                        ordered list of chunk
-                                                        hashes representing the
-                                                        file's new version
-                                                                │
-                                                        Publish "file changed"
-                                                        event (see Message Queues)
-                                                        to notify OTHER devices
-                                                        registered to this account
-                                                                │
-                          Other devices, on receiving the notification, diff their
-                          own local chunk cache against the new metadata's chunk
-                          list, and pull ONLY the chunks they don't already have
-                          locally (same "diff and fetch only what's missing"
-                          principle, applied to download instead of upload)
-```
+
+**Take this as the reference shape of the whole system** — notice that at no point does a full file ever move as a single unit; every arrow that crosses the network carries only chunk hashes or the specific chunks that changed, which is the chunking/deduplication idea from §3 made concrete as an actual request flow.
+
+**Step by step:**
+1. The **Desktop Sync Agent** detects a local file change (a file-watcher process) and splits the changed file into fixed-size chunks, hashing each one.
+2. It calls **`POST /sync-check`** with its base version and full list of local chunk hashes; the **Sync Service** compares this against the file's current version in the **Metadata DB** and returns only the hashes the client actually needs to upload — unchanged chunks are never even mentioned again.
+3. The client uploads **only the changed chunks** to **Chunk Storage** — a content-addressed object store where the key is the chunk's own hash, so a chunk identical to one already stored anywhere in the system (even in a completely different user's file) is automatically deduplicated.
+4. The client then calls **`POST /commit-version`**, and the **Metadata Service** validates the base version hasn't moved since step 2 (the optimistic-concurrency check from §5) before writing the new version record.
+5. On success, the Metadata Service publishes a **"file changed" event** onto the **Message Queue** — every other device registered to the account is notified asynchronously.
+6. Each other device independently runs the same diff-and-fetch logic in reverse: it compares the new version's chunk list against what it already has cached locally, and pulls **only the missing chunks** — the same bandwidth-saving principle applied to download instead of upload.
 
 ---
 
@@ -97,7 +98,19 @@ Two devices editing the same file while offline (or in a race condition even whi
 
 ---
 
-## 6. Data Model
+## 6. Components Used — What Each Piece Is and Why It's Here
+
+| Component | Role in This Design | Why This Choice, Here Specifically | Deep Dive |
+|---|---|---|---|
+| **Load Balancer** | Fronts the Sync Service and Metadata Service, distributing sync-check and commit requests | Standard L7 HTTP routing with health checks; sync traffic is bursty (a user reconnecting after being offline can trigger a large batch of sync-checks at once) | [Load Balancers](../../02-building-blocks/load-balancers/README.md) |
+| **Auto Scaling Group (Sync/Metadata Tier)** | Runs the stateless Sync Service and Metadata Service | Each request is self-contained (a version check, a diff, a commit) — no session state held between requests, so this tier scales horizontally with active sync volume | [Scalability](../../01-foundations/scalability/README.md) |
+| **Metadata DB** | Authoritative store of file/folder structure, permissions, and the ordered chunk-hash list per version | A relational store fits because folder hierarchy and sharing permissions genuinely need referential integrity and multi-row transactional guarantees, unlike the chunk bytes themselves | [SQL vs NoSQL](../../02-building-blocks/databases/sql-vs-nosql/README.md) |
+| **Chunk Storage (content-addressed object storage)** | Stores the actual file bytes, chunked and keyed by content hash | Content-addressing gives automatic, system-wide deduplication as a free property of the storage key itself, and at the exabyte scale estimated in §2, this must be object storage, not a relational table | [CDN](../../02-building-blocks/cdn/README.md) (storage-tiering pattern) |
+| **Message Queue** | Carries "file changed" events from the device that made the edit to every other device registered on the account | Decouples "commit succeeded" from "every other device has been told" — a temporarily offline device simply catches up once reconnected, rather than the committing device waiting on every device's live acknowledgment | [Message Queues](../../02-building-blocks/message-queues/README.md) |
+
+---
+
+## 7. Data Model
 
 ```sql
 -- File metadata: relational, needs referential integrity (folder hierarchy,
@@ -132,7 +145,7 @@ CREATE TABLE chunk_references (
 
 ---
 
-## 7. API Design
+## 8. API Design
 
 ```
 POST /api/v1/files/{fileId}/sync-check
@@ -153,7 +166,7 @@ POST /api/v1/files/{fileId}/commit-version
 
 ---
 
-## 8. Trade-offs & Follow-Up Questions to Anticipate
+## 9. Trade-offs & Follow-Up Questions to Anticipate
 
 | Follow-up | Strong answer direction |
 |---|---|
@@ -164,7 +177,7 @@ POST /api/v1/files/{fileId}/commit-version
 
 ---
 
-## 9. 60-Second Interview Answer
+## 10. 60-Second Interview Answer
 
 > "The core techniques here are chunking and content-addressed deduplication. Splitting every file into fixed-size chunks, each identified by a hash of its own content, means a small edit to a large file only requires re-uploading the changed chunks, not the whole file — and if two different files anywhere in the system happen to share an identical chunk, it's physically stored only once. For sync, each device tracks the last version it synced and diffs against the server's current chunk list to fetch or push only what's missing. For conflicting concurrent edits — two devices editing the same file while offline — I'd detect the conflict via a version number the client must present when committing a change, and on conflict, preserve both versions as a 'conflicted copy' rather than silently picking a winner, since silent data loss is unacceptable for a product where users treat their files as irreplaceable."
 

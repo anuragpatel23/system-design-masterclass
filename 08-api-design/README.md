@@ -6,9 +6,11 @@
 
 | Topic | The concrete question it answers |
 |---|---|
-| [REST Best Practices & Versioning](rest-best-practices/README.md) | What does a professionally designed REST API actually look like — resources, methods, status codes, errors, versioning, compatibility? |
-| [gRPC vs GraphQL vs REST](grpc-graphql-rest/README.md) | Which protocol for which boundary — public API, internal service-to-service, client-facing aggregation? |
-| [WebSockets, SSE & Polling](websockets/README.md) | How do you push data to clients in real time, and at what infrastructure cost? |
+| [Networking Fundamentals — OSI, TCP, UDP](networking-fundamentals/README.md) | What actually happens below HTTP — the seven OSI layers, how TCP earns reliability, why UDP exists, and how HTTP/1.1→2→3 is a running argument with TCP's costs? |
+| [HTTP Fundamentals — Methods & Status Codes](http-fundamentals/README.md) | Every HTTP method's safe/idempotent/cacheable properties, and the full status code catalog including the 502 vs 503 vs 504 distinction? |
+| [REST Best Practices & Versioning](rest-best-practices/README.md) | What does a professionally designed REST API actually look like — resources, methods, status codes, errors, versioning, compatibility, and how "RESTful" is it really (Richardson Maturity Model)? |
+| [gRPC vs GraphQL vs REST](grpc-graphql-rest/README.md) | Which protocol for which boundary — public API, internal service-to-service, client-facing aggregation — and what does each look like on the wire? |
+| [WebSockets, SSE & Polling](websockets/README.md) | How do you push data to clients in real time, what does the WebSocket handshake/frame protocol actually look like, and at what infrastructure cost? |
 | [Pagination Patterns](pagination-patterns/README.md) | Why does `OFFSET 1000000` kill your database, and what do you do instead? |
 | [Idempotency](idempotency/README.md) | How do you make "retry safely" true for operations that move money? |
 

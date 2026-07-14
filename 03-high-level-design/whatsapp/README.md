@@ -11,7 +11,7 @@
 - Delivery status: sent (✓), delivered (✓✓), read (✓✓ blue).
 - Messages delivered even if the recipient is offline when sent (queued for later delivery).
 - Media messages (images, video, voice notes).
-- End-to-end encryption (mention it; deep protocol design is usually out of scope unless explicitly asked).
+- End-to-end encryption via the Signal Protocol (covered in depth in §6, since it materially shapes what the server is architecturally allowed to do).
 - Online/last-seen presence indicators.
 
 ### Non-Functional
@@ -32,35 +32,51 @@
 
 ## 3. High-Level Design
 
+```mermaid
+graph TD
+    DeviceA([Device A — Sender])
+    DeviceB([Device B — Recipient])
+    LB[Load Balancer<br/>routes new connections]
+
+    subgraph GatewayTier["Connection/Gateway Layer — stateful, partitioned"]
+        GW1[Gateway Server 1<br/>holds Device A's socket]
+        GW2[Gateway Server 2<br/>holds Device B's socket]
+    end
+
+    PresenceStore[(Presence/Session Directory<br/>Redis: user_id → gateway_server_id)]
+    PubSub[[Internal Pub/Sub<br/>cross-gateway message routing]]
+    OfflineQueue[(Offline Message Store)]
+    MessageDB[(Message Store<br/>sharded by conversation_id)]
+
+    DeviceA -->|"open persistent connection"| LB --> GW1
+    GW1 -->|"1. is Device B connected anywhere?"| PresenceStore
+    PresenceStore -.->|"Device B → Gateway Server 2"| GW1
+
+    GW1 -->|"2a. ONLINE: publish to recipient's channel"| PubSub
+    PubSub -->|deliver| GW2
+    GW2 -.->|"3a. push over open socket"| DeviceB
+
+    GW1 -->|"2b. OFFLINE: persist for later"| OfflineQueue
+    GW1 -->|"always: append to durable log"| MessageDB
+    DeviceB -.->|"3b. on reconnect, drain pending"| OfflineQueue
+
+    style PresenceStore fill:#f9d976,stroke:#333
+    style MessageDB fill:#a8d5ff,stroke:#333
+    style GatewayTier fill:#fff3cd,stroke:#333
 ```
-   Device A (sender) ──persistent connection──▶ Connection/Gateway Server (holds
-                                                   the open socket, does presence
-                                                   tracking, routes messages)
-                                                        │
-                                              is Device B currently
-                                              connected to SOME gateway
-                                              server? (lookup in a
-                                              distributed "session/
-                                              presence" store)
-                                                        │
-                          ┌─────────────────────────────┴─────────────────────────┐
-                          │ YES (Device B online)                                    │ NO (Device B offline)
-                          ▼                                                          ▼
-              Route message directly to the                            Persist message in an
-              specific gateway server holding                          offline message queue /
-              Device B's connection (often via                         store, keyed by recipient
-              a message broker like Kafka/                             ID, with a durable store
-              a custom pub/sub layer, since                            (see Data Model)
-              the sending gateway server and
-              receiving gateway server are
-              usually DIFFERENT machines)
-                          │                                                          │
-                          ▼                                                          ▼
-              Push message to Device B over                            When Device B reconnects,
-              its open connection; on ack,                             gateway server queries the
-              mark delivered (✓✓) and notify                           offline store and delivers
-              sender                                                   all pending messages, in order
-```
+
+**Take this as the reference shape of the whole system** — the one detail that makes this diagram unlike almost every other design in this vault is the **Gateway Tier itself being stateful**: Device A and Device B are, in general, connected to two *different* physical gateway machines, so a message can never be routed by a simple stateless load-balancer decision alone — it has to be actively looked up and forwarded across machines, which is exactly what the Presence Store and internal Pub/Sub layer exist to do.
+
+**The online-delivery path, step by step:**
+1. Device A sends a message over its already-open persistent connection to **Gateway Server 1**.
+2. Gateway Server 1 looks up Device B's current connection location in the **Presence/Session Directory** — a single fast key lookup answering "which gateway machine, if any, currently holds this user's socket."
+3. If Device B is online (connected to Gateway Server 2, a different machine), Gateway Server 1 publishes the message onto an **internal pub/sub channel** scoped to Device B's user ID; Gateway Server 2, subscribed to that channel because it holds Device B's live connection, receives it and pushes it down the open socket immediately.
+4. Independently of the delivery attempt, the message is appended to the durable **Message Store** — this happens on every message regardless of the recipient's online status, since the message log is the system's source of truth, not the transient push itself.
+
+**The offline-delivery path, step by step:**
+1. If the Presence Store lookup finds no live connection for Device B, Gateway Server 1 instead persists the message into the **Offline Message Store**, keyed by recipient.
+2. When Device B's app reconnects (to whichever gateway server the Load Balancer happens to route it to next), that gateway server queries the Offline Message Store for any pending messages and delivers them in sequence-number order, then clears them from the offline store.
+3. This is also exactly the recovery path for a **gateway server crash** (§9): any device whose connection drops simply reconnects elsewhere and resumes from its last known per-conversation sequence number, treating the gap as if it had simply been offline.
 
 ---
 
@@ -83,7 +99,33 @@ This is the component that makes this system architecturally distinct from a typ
 
 ---
 
-## 6. Data Model
+## 6. Component Deep Dive: End-to-End Encryption (the Signal Protocol)
+
+This deserves more than a scoping-out note, since it's the single most defining technical characteristic of this specific product, and interviewers who ask "design WhatsApp" specifically (rather than a generic chat system) frequently probe here. WhatsApp's E2E encryption is built on the **Signal Protocol**, and the mechanism is worth being able to sketch precisely:
+
+- **X3DH (Extended Triple Diffie-Hellman) — establishing the first shared secret:** when Alice wants to message Bob for the first time, she fetches a bundle of Bob's public keys from the server (his identity key, a signed pre-key, and a one-time pre-key) — the server can hold and hand out these *public* keys freely since they reveal nothing useful to an eavesdropper. Alice combines her own private keys with Bob's public keys through several Diffie-Hellman exchanges to derive a shared secret **that only Alice and Bob can compute**, even though the key material needed to compute it passed through the server — the server never sees the resulting secret itself, only public keys.
+- **The Double Ratchet — a new key for every single message:** rather than reusing that one shared secret for the whole conversation (which would mean one compromised key exposes the entire message history), the Double Ratchet algorithm derives a **new encryption key for every message**, ratcheting forward in a way that's mathematically one-directional. This gives two critical properties: **forward secrecy** (compromising today's key doesn't let an attacker decrypt yesterday's already-sent messages, since old keys are actively discarded after use) and **post-compromise/future secrecy** (a compromised key doesn't compromise future messages either, since the ratchet keeps advancing with fresh Diffie-Hellman contributions from both sides).
+- **What this means architecturally, precisely, for the server design in §3-4:** the server's job shrinks to being a **durable, ordered relay of opaque ciphertext** — it stores and forwards encrypted blobs it cannot read, which is exactly why the `content` column in §8's data model is described as an encrypted payload the server never inspects. This has real, concrete design consequences: server-side content search, spam/abuse content-filtering, and message previews for notifications all become impossible (or must be redesigned around metadata/client-side signals only, since the server has no plaintext to work with) — a genuinely important follow-up an interviewer may probe ("if the server can't read messages, how do push notifications show a preview?" — the honest answer is that either they don't, or the preview is generated and encrypted client-side for the recipient's own devices only).
+- **Group messaging complicates this further:** rather than pairwise Double-Ratchet sessions scaling as O(n²) for an n-person group, WhatsApp (like Signal) uses a **sender key** scheme — each group member generates one symmetric key and distributes it once (pairwise, using the 1:1 protocol above) to every other member, then encrypts messages to the group with that single key, so a message is encrypted once and fanned out, not re-encrypted per recipient — trading a small amount of forward-secrecy granularity (a compromised sender key exposes that member's messages until they rotate it) for making group messaging computationally tractable at scale.
+
+**Why this is worth naming precisely rather than gesturing at "it's encrypted":** it demonstrates you understand E2E encryption isn't a checkbox the server flips — it fundamentally reshapes what the server is *allowed* to do with the data flowing through it, with real, cascading design consequences for every content-aware feature discussed elsewhere in this design.
+
+---
+
+## 7. Components Used — What Each Piece Is and Why It's Here
+
+| Component | Role in This Design | Why This Choice, Here Specifically | Deep Dive |
+|---|---|---|---|
+| **Load Balancer** | Routes new incoming connections to a gateway server; does **not** route individual messages, since it never sees them after the connection is established | Only involved at connect time — once a socket is open, all message routing happens inside the Gateway Tier via the Presence Store and pub/sub, not through the load balancer again | [Load Balancers](../../02-building-blocks/load-balancers/README.md) |
+| **Gateway Server Fleet (partitioned, stateful)** | Holds millions of open persistent connections, each pinned to one specific machine | The one legitimate case where "the server holds state in memory" isn't an anti-pattern — an open socket physically cannot be externalized to a shared cache the way a session token can (§4) | [Scalability](../../01-foundations/scalability/README.md) |
+| **Presence/Session Directory (Redis)** | Answers "which gateway machine, if any, currently holds this user's connection" — one fast lookup per outgoing message | Extremely hot, extremely simple key-value shape (`user_id → gateway_server_id`) — exactly the profile Redis is built for, and it must be low-latency since it sits on the critical path of every single message | [Caching](../../02-building-blocks/caching/README.md) |
+| **Internal Pub/Sub Layer** | Routes a message from the sending gateway server to the specific gateway server holding the recipient's connection | Decouples "which machine produced this message" from "which machine must deliver it" — without this, gateway servers would need direct network paths to every other gateway server for every cross-machine message | [Message Queues](../../02-building-blocks/message-queues/README.md) |
+| **Offline Message Store** | Durably holds messages for recipients with no live connection anywhere, delivered on next reconnect | Must be optimized for a specific access pattern — write once, read-and-clear once on reconnect, keyed by recipient — rather than general-purpose querying | [Message Queues](../../02-building-blocks/message-queues/README.md) |
+| **Message Store** | The durable, append-only source of truth for every message, sharded by conversation ID | Sharding by `conversation_id` (not by user) keeps all messages in a single conversation co-located, matching the per-conversation sequence-number ordering guarantee (§5) | [Sharding](../../02-building-blocks/databases/sharding/README.md) |
+
+---
+
+## 8. Data Model
 
 ```sql
 -- Messages: a message belongs to a conversation, ordered by a per-conversation sequence.
@@ -119,7 +161,7 @@ CREATE TABLE offline_messages (
 
 ---
 
-## 7. API / Protocol Design
+## 9. API / Protocol Design
 
 Unlike a typical REST API, this system is dominated by a **persistent, bidirectional protocol** rather than discrete request/response calls:
 
@@ -139,7 +181,7 @@ A REST-style HTTP API still exists alongside this for non-real-time concerns (ac
 
 ---
 
-## 8. Trade-offs & Follow-Up Questions to Anticipate
+## 10. Trade-offs & Follow-Up Questions to Anticipate
 
 | Follow-up | Strong answer direction |
 |---|---|
@@ -150,7 +192,7 @@ A REST-style HTTP API still exists alongside this for non-real-time concerns (ac
 
 ---
 
-## 9. 60-Second Interview Answer
+## 11. 60-Second Interview Answer
 
 > "The defining challenge here isn't the message volume itself — it's holding hundreds of millions of persistent connections open simultaneously, which requires a stateful, event-driven gateway layer rather than typical stateless request/response app servers, since an open socket physically lives on one specific machine and can't be externalized to a shared cache. I'd assign each conversation a monotonic, per-conversation sequence number rather than a global one, giving ordering and gap-detection without unnecessary global coordination. Delivery is at-least-once with client-side deduplication by message ID, since exactly-once delivery over unreliable mobile networks isn't realistically achievable, matching the same pattern used in reliable message queues. For offline recipients, messages are durably queued and delivered on reconnect, using the same sequence numbers to let the client detect and fill any gap."
 

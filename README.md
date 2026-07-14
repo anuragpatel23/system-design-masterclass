@@ -64,6 +64,8 @@
 | 3 | 05 + 06 + remaining designs from 03. |
 | 4 | 07 + 08 + 10, then 09's question bank. Full mock interviews on alternate days. |
 
+
+
 **1-week crash plan (interview next week):**
 
 Day 1: 01 (all) + 09 interview-framework. Day 2–3: 03 — the four designs most likely for your target company. Day 4: 02 caching + sharding + queues + rate limiting. Day 5: 06 database-scaling + 05 saga pattern. Day 6: 09 capacity-estimation + tradeoff-cheatsheet. Day 7: mock interviews only.
@@ -95,6 +97,7 @@ Every topic note follows the same structure, on purpose:
 - **Failure modes, unprompted.** Staff+ candidates volunteer what happens when the cache dies, the region partitions, or the queue backs up — before being asked. Sections 01, 05, 07, and 10 arm you for this.
 
 ---
+
 
 ## Quick topic finder (interview panic index)
 

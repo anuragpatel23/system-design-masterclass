@@ -18,7 +18,22 @@
 
 ---
 
-## 2. The Backend-for-Frontend (BFF) Pattern
+## 2. Concrete Products — Managed vs Self-Hosted
+
+| Product | Category | Distinguishing trait |
+|---|---|---|
+| **AWS API Gateway** | Managed (cloud) | Deep Lambda integration (common pairing for serverless — see [Serverless](../../07-microservices/serverless/README.md)), usage-plan-based API-key quotas, pay-per-request pricing |
+| **Kong** | Self-hosted / managed | Built on NGINX/OpenResty, plugin-architecture (auth, rate limiting, transformation as composable plugins) — see the dedicated [Kong API Gateway](../../11-technologies/kong-api-gateway/README.md) deep dive |
+| **Apigee (Google)** | Managed (cloud) | Strong API monetization/analytics features, aimed at enterprises exposing APIs as a product to external partners |
+| **Azure API Management** | Managed (cloud) | Integrates with Azure AD for auth, developer portal generation for external API consumers out of the box |
+| **Envoy Gateway / Ambassador** | Self-hosted | Built on Envoy proxy (see [Load Balancers §4](../load-balancers/README.md)) — the natural choice when the internal service mesh is also Envoy-based, for a consistent data-plane technology at both the edge and internally |
+| **Traefik** | Self-hosted | Auto-discovers routes from container/Kubernetes labels, popular in containerized environments for its low-config operational model |
+
+**The practical decision:** managed cloud gateways (AWS/Apigee/Azure) minimize operational burden and fit naturally if the backend is already on that cloud; self-hosted gateways (Kong/Envoy/Traefik) trade that convenience for portability, deeper customization via plugins, and avoiding cloud-specific lock-in at the edge — the same capex/elasticity-style trade-off discussed for load balancers applies here, one layer up the stack.
+
+---
+
+## 3. The Backend-for-Frontend (BFF) Pattern
 
 A single, generic API Gateway serving both a data-hungry web client and a bandwidth/battery-constrained mobile client often ends up as an awkward compromise for both. The **BFF pattern** introduces a **dedicated gateway layer per client type** (a "web BFF" and a "mobile BFF"), each independently shaped to that client's specific needs (the mobile BFF might aggressively aggregate and trim payloads to minimize round trips and data usage; the web BFF might pass through more raw data since the web client has more bandwidth and can do its own client-side composition).
 
@@ -26,7 +41,7 @@ A single, generic API Gateway serving both a data-hungry web client and a bandwi
 
 ---
 
-## 3. API Gateway vs Service Mesh — a Common Point of Confusion
+## 4. API Gateway vs Service Mesh — a Common Point of Confusion
 
 - **API Gateway:** handles **north-south traffic** — requests entering the system from *outside* (external clients, third-party integrations).
 - **Service Mesh** (e.g., Istio, Linkerd): handles **east-west traffic** — communication *between* internal services, typically via sidecar proxies, providing similar concerns (routing, retries, mTLS, observability) but for internal service-to-service calls rather than external ingress.
@@ -35,7 +50,7 @@ They solve structurally similar problems (routing, security, observability) but 
 
 ---
 
-## 4. Real-World Example: Netflix's Zuul (and Its Evolution) as the Edge Gateway for a Massive Microservices Fleet
+## 5. Real-World Example: Netflix's Zuul (and Its Evolution) as the Edge Gateway for a Massive Microservices Fleet
 
 Netflix's engineering blog has extensively documented **Zuul**, the edge gateway sitting in front of their microservices architecture (which, at various points, has comprised many hundreds of independently deployed services):
 
@@ -47,7 +62,7 @@ Netflix's engineering blog has extensively documented **Zuul**, the edge gateway
 
 ---
 
-## 5. Spring Boot Example: A Gateway with Routing, Auth, and Response Aggregation using Spring Cloud Gateway
+## 6. Spring Boot Example: A Gateway with Routing, Auth, and Response Aggregation using Spring Cloud Gateway
 
 ```java
 // build.gradle: spring-cloud-starter-gateway
@@ -167,7 +182,7 @@ spring:
 
 ---
 
-## 6. Common Pitfalls
+## 7. Common Pitfalls
 
 - Turning the API Gateway into a "smart" gateway with real business logic (beyond composition/aggregation) — this recreates a monolith at the edge and couples the gateway's deploy cycle to business logic changes that shouldn't need it.
 - Making the gateway itself a single point of failure by under-provisioning or under-scaling it — since 100% of traffic passes through it, it needs to be at least as horizontally scaled and highly available as the busiest individual backend service (see [Load Balancers](../load-balancers/README.md) for how the gateway's own availability is typically achieved).
@@ -176,7 +191,7 @@ spring:
 
 ---
 
-## 7. 60-Second Interview Answer
+## 8. 60-Second Interview Answer
 
 > "An API Gateway is the single entry point handling cross-cutting concerns — routing, auth, rate limiting, response aggregation, observability — so individual microservices don't each reimplement them, and external clients see one coherent surface instead of the internal service topology. It's distinct from a service mesh, which handles the same kinds of concerns but for internal, service-to-service traffic rather than external ingress — mature systems often use both. I'd be careful not to let the gateway accumulate real business logic, keeping it focused on composition and cross-cutting concerns, and I'd make sure it's scaled and made highly available at least as aggressively as the busiest backend service, since literally all traffic passes through it."
 

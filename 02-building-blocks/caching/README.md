@@ -18,7 +18,30 @@ Each layer trades scope for speed: browser cache is instant but only helps that 
 
 ---
 
-## 2. Caching Strategies (the classic interview table, explained precisely)
+## 2. Redis vs. Memcached — the Concrete Product Choice
+
+"We'll add a distributed cache" begs the question of which one, and the two dominant options differ enough that the choice is a real design decision, not a coin flip:
+
+| Dimension | Redis | Memcached |
+|---|---|---|
+| **Data structures** | Rich: strings, hashes, lists, sets, sorted sets, streams, HyperLogLog, bitmaps | Strings (blobs) only — the client serializes/deserializes everything |
+| **Persistence** | Optional disk persistence (RDB snapshots, AOF log) — can survive a restart | Purely in-memory — a restart loses everything, by design |
+| **Threading model** | Historically single-threaded for command execution (simplifies atomicity of operations — no lock needed for a single `INCR`), with I/O threading added in later versions for network handling | Multi-threaded — can use multiple CPU cores natively for a pure key-value workload |
+| **Replication / clustering** | Built-in primary-replica replication and **Redis Cluster** for sharded, highly-available deployments | No native replication or clustering — relies on client-side sharding (consistent hashing across a static server list) |
+| **Pub/Sub** | Built-in — usable for real-time messaging, cache-invalidation broadcast (see below), or lightweight event distribution | Not supported |
+| **Atomic operations** | Rich atomic primitives (`INCR`, sorted-set operations, Lua scripting for multi-step atomic transactions) | Basic atomic increment/decrement only |
+| **Memory efficiency (pure key-value blobs)** | Slightly higher per-key overhead due to richer internal data structures | Generally more memory-efficient for the narrow case of simple key-value blobs, due to a simpler internal design |
+| **Best fit** | Anything needing more than a flat key-value cache — rate limiting counters ([Rate Limiting](../rate-limiting/README.md)), leaderboards (sorted sets), session stores, pub/sub-based invalidation, or where persistence/HA matters | A pure, maximally simple, multi-core-parallel key-value cache with no persistence needs — historically the choice when raw throughput-per-dollar for simple blobs was the only concern |
+
+**The practical answer today:** Redis has become the default for most new systems precisely because its extra capabilities (data structures, persistence, clustering, pub/sub) cover Memcached's use case as a strict subset while adding options that are frequently needed later — session storage, counters, leaderboards — without introducing a second technology. Memcached still shows up in legacy systems and in the specific case of an extremely simple, pure-blob cache where multi-core throughput per node matters more than any of Redis's extra features.
+
+### Multi-tier caching and the invalidation problem it creates
+
+A common high-performance pattern layers an **in-process cache** (Caffeine, a plain `HashMap` with eviction — nanosecond access, no network hop) *in front of* a **distributed cache** (Redis) *in front of* the database — the local cache absorbs the hottest fraction of keys, and Redis absorbs the rest. The genuine complication: with N app server instances each running their own local in-process cache, invalidating a key on write means invalidating it **on every instance**, not just the one that handled the write. The standard fix is a **pub/sub invalidation broadcast** — the writer publishes an "invalidate key X" message (via Redis pub/sub, or a lightweight message bus) that every instance subscribes to and reacts to by evicting the key from its own local cache — a good concrete example of trading a small amount of new complexity (a pub/sub subscriber in every instance) for the latency win of a local cache tier.
+
+---
+
+## 3. Caching Strategies (the classic interview table, explained precisely)
 
 ### Cache-Aside (Lazy Loading) — the most common pattern
 Application code checks the cache first; on a miss, it reads from the database and populates the cache.
@@ -49,7 +72,7 @@ Similar to cache-aside, but the cache library/service itself is responsible for 
 
 ---
 
-## 3. Eviction Policies — What Happens When the Cache Is Full
+## 4. Eviction Policies — What Happens When the Cache Is Full
 
 | Policy | Rule | Good for |
 |---|---|---|
@@ -62,7 +85,7 @@ See also [LRU Cache](../../04-low-level-design/lru-cache/README.md) for the actu
 
 ---
 
-## 4. Cache Invalidation — "The Two Hard Problems in Computer Science"
+## 5. Cache Invalidation — "The Two Hard Problems in Computer Science"
 
 The famous joke ("there are only two hard things in computer science: cache invalidation and naming things") exists because invalidation genuinely is subtle:
 
@@ -72,7 +95,7 @@ The famous joke ("there are only two hard things in computer science: cache inva
 
 ---
 
-## 5. Real-World Example: Twitter's Timeline Caching with Memcached (and the "Cache-Aside at Massive Scale" Pattern)
+## 6. Real-World Example: Twitter's Timeline Caching with Memcached (and the "Cache-Aside at Massive Scale" Pattern)
 
 Twitter's home timeline generation is a canonical caching case study. Generating a user's timeline (a fan-in of tweets from everyone they follow, ranked) from scratch on every page load would be prohibitively expensive at Twitter's request volume.
 
@@ -85,7 +108,7 @@ Twitter's publicly described architecture uses **fan-out-on-write**: when a user
 
 ---
 
-## 6. Spring Boot Example: Cache-Aside with Redis, Including Stampede Protection
+## 7. Spring Boot Example: Cache-Aside with Redis, Including Stampede Protection
 
 ```java
 // build.gradle: spring-boot-starter-data-redis, spring-boot-starter-cache
@@ -183,7 +206,7 @@ spring:
 
 ---
 
-## 7. Common Pitfalls
+## 8. Common Pitfalls
 
 - Caching everything by default — increases memory cost and invalidation complexity for data that's rarely re-read, and can push out genuinely hot data (see eviction policy mismatch).
 - No TTL at all — "we'll invalidate manually on every write" is a common source of production bugs, since it's easy to miss a code path that mutates data without invalidating the corresponding cache entry. A TTL as a safety net, even a long one, is cheap insurance.
@@ -192,7 +215,7 @@ spring:
 
 ---
 
-## 8. 60-Second Interview Answer
+## 9. 60-Second Interview Answer
 
 > "Caching trades memory and a staleness risk for reduced latency and database load. I'd pick the strategy based on read/write ratio and staleness tolerance: cache-aside for read-heavy, rarely-changing data with explicit invalidation on write; write-through when the cache must never be stale; write-behind only when losing the last few seconds of data on a crash is acceptable, in exchange for very low write latency. For eviction I'd default to LRU, and for invalidation I'd combine TTLs as a safety net with explicit invalidation on write. I'd also proactively guard against cache stampede on hot keys — using request coalescing or a short-lived lock so a single expiring popular key doesn't send a flood of concurrent requests to the database at once."
 

@@ -30,7 +30,19 @@ The common thread across all of them: **relaxed or absent schema enforcement, ho
 
 ---
 
-## 3. The Actual Decision Framework (what a staff interview is testing)
+## 3. NewSQL — the Category That Blurs the Line Further
+
+A third category, distinct from both traditional relational and NoSQL: **distributed SQL** databases (Google Spanner, CockroachDB, TiDB, YugabyteDB) aim to give you **both** — a relational model with real SQL, joins, and ACID transactions, **and** horizontal write scalability with built-in sharding, achieved via a consensus protocol (typically [Raft](../../../05-distributed-systems/consensus-algorithms/raft/README.md)) replicating and coordinating each shard automatically instead of leaving sharding as a manual application-level exercise.
+
+- **The trade-off they don't eliminate:** distributed consensus for every write has a real latency cost — cross-shard, strongly consistent transactions require coordination round trips that a single-node relational database simply doesn't pay. Google Spanner's own well-known solution, **TrueTime** (GPS- and atomic-clock-synchronized clocks across data centers, bounding clock uncertainty to a known small window), is specifically built to make globally-consistent transaction ordering fast enough to be practical — a genuinely novel piece of infrastructure most companies don't have access to, which is part of why Spanner itself is offered only as a managed Google Cloud service.
+- **When NewSQL is the right answer:** you need SQL/joins/ACID *and* you've genuinely outgrown a single-leader relational database's write throughput, and you'd rather pay for (and operationally depend on) a distributed-consensus database than build and maintain manual sharding (§ [Sharding](../sharding/README.md)) yourselves.
+- **Why it isn't a default answer:** operationally newer and less battle-tested than decades-old Postgres/MySQL, cross-shard transaction latency is real and must be designed around, and for the large majority of systems that haven't actually exhausted vertical scaling + read replicas + functional sharding, it's solving a problem they don't have yet.
+
+**Why naming NewSQL specifically matters in an interview:** it demonstrates you know the SQL-vs-NoSQL framing itself is now a simplification — the honest, current landscape is a three-way trade space (single-node relational, horizontally-native NoSQL, distributed-consensus relational), and being able to place a real system (Spanner, CockroachDB) in that third category, with its specific latency trade-off named, is a stronger signal than treating "SQL vs NoSQL" as the complete picture.
+
+---
+
+## 4. The Actual Decision Framework (what a staff interview is testing)
 
 | Question | If "yes" → lean SQL | If "yes" → lean NoSQL |
 |---|---|---|
@@ -45,7 +57,7 @@ The common thread across all of them: **relaxed or absent schema enforcement, ho
 
 ---
 
-## 4. Real-World Example: Uber's Migration from Postgres to a Custom MySQL-based Schemaless Layer, and Back
+## 5. Real-World Example: Uber's Migration from Postgres to a Custom MySQL-based Schemaless Layer, and Back
 
 Uber's engineering blog has publicly documented a genuinely instructive back-and-forth: they originally used **Postgres**, migrated core datastores to a custom **MySQL-based "Schemaless"** layer (a sharded, append-only key-value abstraction on top of MySQL) to solve write-scalability and replication issues they were hitting at rapidly growing scale, and later **migrated back to Postgres** for a significant portion of workloads once Postgres's own scalability and tooling caught up and the operational complexity of the custom layer outweighed its benefits.
 
@@ -57,7 +69,7 @@ The senior-level lesson from this case, as Uber's engineers describe it:
 
 ---
 
-## 5. Spring Boot Example: Using Both in the Same Application (Polyglot Persistence)
+## 6. Spring Boot Example: Using Both in the Same Application (Polyglot Persistence)
 
 A realistic e-commerce order service: **order data** (needs ACID, relationships, financial correctness) lives in Postgres; **product catalog** (highly variable attribute sets per category, read-heavy) lives in MongoDB.
 
@@ -138,7 +150,7 @@ spring:
 
 ---
 
-## 6. Common Pitfalls
+## 7. Common Pitfalls
 
 - Treating "NoSQL" as one technology rather than four distinct data models (key-value, document, wide-column, graph) with very different strengths.
 - Choosing NoSQL purely because "it scales better" without a concrete scaling bottleneck identified — modern relational databases handle far more scale than this myth assumes, especially with read replicas.
@@ -147,7 +159,7 @@ spring:
 
 ---
 
-## 7. 60-Second Interview Answer
+## 8. 60-Second Interview Answer
 
 > "SQL gives you ACID transactions, enforced schema, and joins, at the cost of write-scaling requiring sharding, which is hard. NoSQL is really four different data models — key-value, document, wide-column, graph — each trading schema enforcement and joins for horizontal scalability and a data model suited to a specific access pattern. I'd choose based on concrete needs: relational for data with real cross-entity transactional requirements like orders and payments, document stores for data with highly variable structure like a product catalog, wide-column for massive write-heavy event data, graph when the core query is relationship traversal. In practice, most real systems use more than one — polyglot persistence per bounded context, not one database technology for the whole system."
 

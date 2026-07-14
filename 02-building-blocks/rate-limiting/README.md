@@ -50,6 +50,23 @@ A rate limiter enforcing a limit **per API key across an entire fleet of N appli
 
 Real production systems typically layer **multiple rate limits simultaneously** — e.g., a per-IP limit at the edge (catches anonymous abuse before auth even happens) combined with a per-API-key limit further in (enforces the customer's actual paid tier) combined with a global per-endpoint limit (protects a specific fragile downstream dependency regardless of source).
 
+### Communicating limits to the client
+
+A well-designed rate limiter tells the client where it stands, so well-behaved clients can self-throttle instead of discovering the limit only by hitting `429`:
+
+- `X-RateLimit-Limit` — the total quota for the current window.
+- `X-RateLimit-Remaining` — how many requests are left before the limit is hit.
+- `X-RateLimit-Reset` — when the window resets (Unix timestamp or seconds).
+- `Retry-After` — sent specifically with a `429` response (see [HTTP Fundamentals](../../08-api-design/http-fundamentals/README.md)), telling the client precisely how long to wait before retrying, so a well-behaved client can back off deterministically instead of guessing or hammering immediately.
+
+### At extreme scale: approximate, sharded rate limiting
+
+A single centralized Redis counter (§2) becomes its own bottleneck and added-latency cost once request volume is high enough — every single request now pays a network round trip to Redis just to be counted. Two standard mitigations trade strict global accuracy for scale:
+- **Local-first with periodic sync:** each app server keeps its own local, approximate counter and only periodically (e.g., every few hundred milliseconds) syncs/reconciles with the shared Redis store — meaning the enforced limit can briefly overshoot the true global limit by up to the sync interval's worth of traffic, in exchange for removing Redis from the hot path of every single request.
+- **Sharded counters:** instead of one global key per client, split the limit across several Redis keys (or nodes) and give each app server (or shard) a fraction of the total budget — trades perfect global fairness (one server's shard might exhaust while another's is idle) for eliminating a single hot key/node as a bottleneck under very high request volume, similar in spirit to the hot-key sharding trade-offs in [Database Sharding](../databases/sharding/README.md).
+
+**The framing worth stating explicitly:** rate limiting itself sits on a consistency/availability spectrum, just like data does — a perfectly accurate, strongly consistent global counter costs a network round trip and a single coordination point per request, while an approximate, eventually-synced counter trades some precision for lower latency and higher scalability, the same trade-off CAP/PACELC describe for data, applied to a counter instead.
+
 ---
 
 ## 4. Real-World Example: Stripe's API Rate Limiting

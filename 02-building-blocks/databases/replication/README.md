@@ -25,7 +25,19 @@ Any replica can accept a write; the client (or a coordinator) writes to multiple
 
 ---
 
-## 2. Synchronous vs Asynchronous Replication
+## 2. How Replication Actually Happens, Mechanically: Log Shipping
+
+Underneath every topology in §1, replication is implemented by shipping a **write-ahead log (WAL)** (Postgres) or **binary log (binlog)** (MySQL) — the same durable, append-only log the database already writes internally to guarantee crash recovery — from the leader to each replica, which replays those log entries to reconstruct the identical sequence of changes.
+
+- **Physical (log) replication:** ships the raw, low-level log records (literally "byte X on disk page Y changed to this value") — replicas end up byte-for-byte identical to the leader, and it's fast since there's no need to reinterpret SQL, but it requires the replica to be running the same database version/architecture.
+- **Logical replication:** ships a higher-level, decoded representation of each change ("row with this primary key was updated to these column values") — more flexible (can replicate between different versions, or into a different system entirely, like streaming database changes into Kafka via **Change Data Capture**, see [Event-Driven Architecture](../../../05-distributed-systems/event-driven-architecture/README.md)), at some additional CPU cost to decode/re-encode each change.
+- **Replication lag, precisely defined in these terms:** it's the gap between the leader's current log position and the position a given replica has replayed up to — often measured directly as **bytes of unreplayed log** or a **log sequence number (LSN) offset**, which is exactly the metric managed database consoles (RDS, Cloud SQL) surface as "replica lag."
+
+Understanding log shipping as the actual mechanism — not just "the data gets copied" — is what lets you reason correctly about *why* physical replicas must match versions, why logical replication enables cross-version or cross-system streaming, and why CDC pipelines (Debezium and similar tools) work by tailing this exact same log rather than polling the database with queries.
+
+---
+
+## 3. Synchronous vs Asynchronous Replication
 
 - **Synchronous:** the leader waits for the replica(s) to confirm they've received/applied the write before acknowledging success to the client. Guarantees zero data loss on leader failure (the replica is always caught up) but adds latency to every write, and if the replica is slow/down, writes can stall or fail entirely (an Availability cost per [CAP Theorem](../../../01-foundations/cap-theorem/README.md)).
 - **Asynchronous:** the leader acknowledges the write immediately and propagates to replicas in the background. Low write latency, high availability, but **replication lag** means replicas can serve stale reads, and a leader crash before propagation means those last writes are **lost**.
@@ -33,7 +45,7 @@ Any replica can accept a write; the client (or a coordinator) writes to multiple
 
 ---
 
-## 3. Replication Lag and Its Consequences
+## 4. Replication Lag and Its Consequences
 
 Asynchronous replication's central cost is **replication lag** — the delay between a write on the leader and its visibility on a replica. This directly causes the [Consistency Models](../../../01-foundations/consistency-models/README.md) problems discussed earlier — most concretely, **read-your-writes violations**, where a user updates something and then, on the very next request (routed to a lagging replica), doesn't see their own change.
 
@@ -41,7 +53,7 @@ Asynchronous replication's central cost is **replication lag** — the delay bet
 
 ---
 
-## 4. Failover — What Happens When the Leader Dies
+## 5. Failover — What Happens When the Leader Dies
 
 1. **Detection:** a monitoring/consensus mechanism (e.g., a heartbeat via a tool like Patroni for Postgres, or built into the database itself, like MySQL Group Replication) determines the leader is unreachable.
 2. **Election:** the replica with the most up-to-date data (least replication lag) is chosen as the new leader — often via a consensus algorithm ([Raft](../../../05-distributed-systems/consensus-algorithms/raft/README.md)) to avoid two nodes both believing they're the new leader (**split-brain**).
@@ -51,7 +63,7 @@ Asynchronous replication's central cost is **replication lag** — the delay bet
 
 ---
 
-## 5. Real-World Example: MySQL Replication at GitHub, and Their Use of `orchestrator` for Automated Failover
+## 6. Real-World Example: MySQL Replication at GitHub, and Their Use of `orchestrator` for Automated Failover
 
 GitHub's engineering blog has publicly detailed their MySQL replication topology, which serves an enormous, latency-sensitive read/write workload:
 
@@ -63,7 +75,7 @@ GitHub's engineering blog has publicly detailed their MySQL replication topology
 
 ---
 
-## 6. Spring Boot Example: Routing Reads to Replicas and Writes to the Primary
+## 7. Spring Boot Example: Routing Reads to Replicas and Writes to the Primary
 
 ```java
 // A routing DataSource, similar in spirit to the sharding example, but here
@@ -149,7 +161,7 @@ app:
 
 ---
 
-## 7. Common Pitfalls
+## 8. Common Pitfalls
 
 - Treating replication as a solution to write scalability — it only scales reads; write throughput is still capped by the single leader (or requires multi-leader/leaderless topologies with their own conflict-resolution costs).
 - Ignoring replication lag in the application design, causing intermittent, hard-to-reproduce "stale data" bugs that are actually a direct, predictable consequence of asynchronous replication.
@@ -158,7 +170,7 @@ app:
 
 ---
 
-## 8. 60-Second Interview Answer
+## 9. 60-Second Interview Answer
 
 > "Replication copies data across machines mainly to scale reads and provide fault tolerance, not to scale writes. Single-leader is the simplest and most common topology — one write path, multiple read replicas — but it introduces replication lag with asynchronous replication, which can cause read-your-writes violations if a user's own write hasn't propagated to the replica serving their next read yet. I'd mitigate that by routing a user's own reads to the primary for a short window after they write. For failover, I'd want automated detection and leader election via consensus, requiring multiple corroborating health signals rather than a single missed heartbeat, to avoid triggering split-brain on a transient network blip."
 

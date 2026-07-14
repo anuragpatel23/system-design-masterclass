@@ -10,7 +10,26 @@ Light in fiber travels at roughly two-thirds the speed of light in a vacuum — 
 
 ---
 
-## 2. Push vs Pull CDNs
+## 2. How a Client Actually Finds "the Nearest Edge Node"
+
+A CDN's latency win only materializes if requests are actually routed to a *physically nearby* edge — this routing happens via one of two mechanisms (both covered mechanically in [Load Balancers §7 — DNS-Based Load Balancing & GSLB](../load-balancers/README.md), since a CDN's edge-selection problem is the same problem as global server load balancing):
+
+- **DNS-based geo-routing:** the CDN's DNS servers resolve `cdn.example.com` to a *different* IP depending on the resolver's apparent geographic location — a request from Tokyo gets an IP for a Tokyo edge node, a request from Frankfurt gets a Frankfurt one. Simple, but inherits DNS's TTL-driven staleness and the imprecision of guessing location from resolver IP rather than the actual client.
+- **Anycast:** the exact same IP address is announced from every edge location via BGP, and normal internet routing delivers each packet to whichever announcing location is topologically closest — no DNS trickery, and failover is as fast as BGP route withdrawal rather than bounded by a DNS TTL. This is the mechanism behind Cloudflare's and Google Cloud CDN's edge routing, and it's why Anycast-based CDNs can simultaneously serve as DDoS mitigation — an attack's traffic is organically spread across every edge location announcing the IP, rather than concentrating on one origin.
+
+## 3. Concrete CDN Providers
+
+| Provider | Distinguishing trait |
+|---|---|
+| **Cloudflare** | Anycast-first architecture, extremely large edge footprint, bundles CDN with DDoS protection, WAF, and DNS as one product |
+| **Akamai** | The oldest and one of the largest CDNs by edge-node count, deep enterprise/media-streaming focus (see §5) |
+| **AWS CloudFront** | Tight integration with S3 (origin), Lambda@Edge (run code at the edge), and the rest of the AWS ecosystem |
+| **Google Cloud CDN** | Anycast, built on the same global network/edge infrastructure as GCP's global load balancer ([Load Balancers §6](../load-balancers/README.md)) |
+| **Fastly** | Popular for its fast (sub-second) purge/invalidation propagation and programmable edge logic (VCL), attractive when routine near-real-time invalidation matters more than the "cache-bust with versioned URLs" default |
+
+---
+
+## 4. Push vs Pull CDNs
 
 ### Pull CDN (Origin Pull) — the more common model today
 Edge nodes fetch content from the origin **on the first request** (cache miss) and cache it for subsequent requests, until it expires or is invalidated.
@@ -26,7 +45,7 @@ Content is proactively uploaded to all (or many) edge nodes **ahead of time**, b
 
 ---
 
-## 3. What CDNs Cache (and What They Can't)
+## 5. What CDNs Cache (and What They Can't)
 
 - **Static assets** (images, CSS, JS, video segments, downloadable files) — the classic, easy case: content is identical for every user and changes rarely.
 - **Dynamic content acceleration:** modern CDNs (Cloudflare, Akamai, CloudFront) also optimize *dynamic*, per-user content — not by caching the actual response (which varies per user), but by terminating the TLS handshake and TCP connection at the nearby edge node, then using an optimized, persistent backbone connection from the edge back to the origin — cutting the "expensive" part of the round trip (initial connection setup, especially over lossy/high-latency public internet paths) even for uncacheable responses.
@@ -34,7 +53,7 @@ Content is proactively uploaded to all (or many) edge nodes **ahead of time**, b
 
 ---
 
-## 4. Cache Invalidation at the Edge
+## 6. Cache Invalidation at the Edge
 
 The same invalidation challenge from [Caching](../caching/README.md#4-cache-invalidation--the-two-hard-problems-in-computer-science) applies, amplified by geographic distribution:
 
@@ -44,7 +63,7 @@ The same invalidation challenge from [Caching](../caching/README.md#4-cache-inva
 
 ---
 
-## 5. Real-World Example: Akamai's Edge Network During Major Live-Streamed Events
+## 7. Real-World Example: Akamai's Edge Network During Major Live-Streamed Events
 
 Akamai, one of the oldest and largest CDN providers, has publicly described the engineering behind delivering massive live-streaming events (major sporting events with tens of millions of concurrent global viewers) without origin servers being overwhelmed:
 
@@ -56,7 +75,7 @@ Akamai, one of the oldest and largest CDN providers, has publicly described the 
 
 ---
 
-## 6. Spring Boot Example: Setting Correct Cache-Control Headers So a CDN Knows What/How Long to Cache
+## 8. Spring Boot Example: Setting Correct Cache-Control Headers So a CDN Knows What/How Long to Cache
 
 A CDN can only cache correctly if the origin application tells it how — this is entirely driven by standard HTTP caching headers, which a Spring Boot application controls directly.
 
@@ -120,7 +139,7 @@ public class ProductImageController {
 
 ---
 
-## 7. Common Pitfalls
+## 9. Common Pitfalls
 
 - Applying one blanket cache policy to an entire application instead of differentiating by content type/sensitivity (immutable static assets vs short-TTL dynamic data vs never-cache private data).
 - Forgetting that a **shared** CDN cache (`Cache-Control: public`) is fundamentally different from a private browser cache (`Cache-Control: private`) — accidentally marking user-specific data as `public` is a serious data-leak risk (User A's cached response being served to User B from a shared edge node).
@@ -129,7 +148,7 @@ public class ProductImageController {
 
 ---
 
-## 8. 60-Second Interview Answer
+## 10. 60-Second Interview Answer
 
 > "A CDN caches content at edge locations physically close to users, cutting the latency floor imposed by the speed of light in fiber — a request that would round-trip across a continent instead gets served from a nearby edge node. Pull CDNs populate on first request and are the default; push CDNs, or pre-warmed pull CDNs, are used for predictable high-demand events to avoid a simultaneous cold-cache stampede. I'd drive caching behavior entirely through explicit Cache-Control headers per endpoint — long, immutable caching for content-hashed static assets, short TTLs with ETag revalidation for frequently-changing but shareable data, and no-store for private, per-user data, since a shared edge cache serving one user's private response to another user is a serious security bug, not just a performance miss."
 

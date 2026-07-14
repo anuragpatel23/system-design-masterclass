@@ -18,7 +18,25 @@ A message is broadcast to **all** subscribers of a topic — each subscriber get
 
 ---
 
-## 2. Delivery Guarantees — the Precise Definitions
+## 2. Concrete Products, and the Deeper Architectural Split: Queue vs. Log
+
+| Product | Model | Distinguishing trait |
+|---|---|---|
+| **Apache Kafka** | Distributed commit log | Messages are **retained** for a configured period (or forever) regardless of consumption — consumers track their own read position (offset) and can **replay** history; built for very high sustained throughput |
+| **RabbitMQ** | Traditional message broker | Rich routing (exchanges: direct, topic, fanout, headers) for complex routing logic; messages are typically **deleted once acknowledged** by the consumer — no replay by default |
+| **Amazon SQS** | Managed queue | Simple, fully managed point-to-point queue; **FIFO queues** available for strict per-group ordering + exactly-once-ish deduplication, at lower throughput than **standard queues** (best-effort ordering, higher throughput) |
+| **Amazon SNS / Google Pub/Sub** | Managed pub/sub | Fully managed topic-based broadcast; often paired with SQS (SNS fans out to multiple SQS queues, one per consumer type) for managed pub/sub + durable per-consumer queueing combined |
+| **Apache Pulsar** | Distributed log (Kafka alternative) | Separates storage (BookKeeper) from serving layer, enabling independent scaling of the two and multi-tenancy features Kafka added only later |
+
+**The deeper distinction worth naming explicitly: "queue" semantics vs. "log" semantics.**
+- A **traditional queue** (RabbitMQ, SQS) treats a message as **consumed and gone** once acknowledged — there is one logical "current state" of the queue, and once you've processed a message, it's not there to be reprocessed or inspected by a second, independent consumer type without explicit fan-out.
+- A **log** (Kafka, Pulsar) treats messages as an **append-only, retained sequence** — consumption doesn't delete anything; multiple, entirely independent consumer groups can each read the same log at their own pace and even **replay from an earlier offset** (reprocess the last 24 hours of events after fixing a bug, rebuild a downstream system's state from scratch by replaying history, or onboard a brand-new consumer type without any change to producers). This replayability is *the* reason log-based systems became the default backbone for [event-driven architecture](../../05-distributed-systems/event-driven-architecture/README.md) and [CQRS/event sourcing](../../05-distributed-systems/cqrs-event-sourcing/README.md) — the log itself can serve as the durable source of truth, not just a transient delivery mechanism.
+
+**The practical choice:** reach for a traditional queue (SQS/RabbitMQ) for straightforward task distribution where once-processed-means-gone is exactly right (resize this image, send this email). Reach for a log (Kafka/Pulsar) when multiple independent systems need their own view of the same event stream, when replay/reprocessing is a real requirement, or when sustained throughput at very large scale is the dominant constraint.
+
+---
+
+## 3. Delivery Guarantees — the Precise Definitions
 
 | Guarantee | Meaning | Risk |
 |---|---|---|
@@ -30,20 +48,20 @@ A message is broadcast to **all** subscribers of a topic — each subscriber get
 
 ---
 
-## 3. Dead Letter Queues (DLQ)
+## 4. Dead Letter Queues (DLQ)
 
 When a message repeatedly fails processing (a bug, a malformed payload, a downstream dependency permanently down), it shouldn't be retried forever, blocking the queue behind it (**head-of-line blocking**) or silently dropped. A **Dead Letter Queue** captures messages that exceed a retry limit, moving them aside for manual inspection or automated alerting — keeping the main queue flowing while preserving the failed message for debugging/reprocessing.
 
 ---
 
-## 4. Ordering Guarantees
+## 5. Ordering Guarantees
 
 - **Global ordering across an entire topic/queue is expensive and rarely actually needed** — it typically requires a single partition/consumer, which caps throughput.
 - **Partitioned ordering** (Kafka's model) — messages with the same partition key (e.g., the same `order_id`) are guaranteed to be processed in order **relative to each other**, while different keys can be processed in parallel across partitions, with no ordering guarantee *between* different keys. This is almost always the right trade-off: identify what actually needs relative ordering (usually: events about the *same entity*) and partition by that key.
 
 ---
 
-## 5. Real-World Example: LinkedIn's Kafka — Built to Decouple Hundreds of Independent Consumers from a Firehose of Events
+## 6. Real-World Example: LinkedIn's Kafka — Built to Decouple Hundreds of Independent Consumers from a Firehose of Events
 
 Kafka was originally built at LinkedIn specifically to solve a scaling problem: as the number of systems needing to consume the same activity-stream data (page views, profile updates, etc.) grew, point-to-point integrations between every producer and every consumer became an unmanageable `O(n²)` mesh of custom pipelines.
 
@@ -53,7 +71,7 @@ LinkedIn's engineering blog describes the shift to a **central, durable, replaya
 
 ---
 
-## 6. Spring Boot Example: Idempotent, At-Least-Once Consumer with a Dead Letter Queue
+## 7. Spring Boot Example: Idempotent, At-Least-Once Consumer with a Dead Letter Queue
 
 ```java
 // build.gradle: spring-kafka
@@ -133,7 +151,7 @@ spring:
 
 ---
 
-## 7. Common Pitfalls
+## 8. Common Pitfalls
 
 - Claiming "exactly-once" delivery without qualifying it as at-least-once + idempotent consumer — a precise, senior-level correction to make even when the interviewer's question uses the looser term.
 - Building consumers that are not idempotent, then being surprised by duplicate processing (double-charging a customer, double-decrementing inventory) under at-least-once delivery, which is the *default and expected* behavior of nearly every production message queue.
@@ -142,7 +160,7 @@ spring:
 
 ---
 
-## 8. 60-Second Interview Answer
+## 9. 60-Second Interview Answer
 
 > "Message queues decouple producers from consumers in time and failure domain. Point-to-point delivers each message to one consumer for competing work; pub/sub broadcasts to every subscriber for independent downstream reactions — Kafka actually gives you both, since it's pub/sub across consumer groups but point-to-point within a group. For delivery guarantees, I'd assume at-least-once by default and design consumers to be idempotent, since true exactly-once across a network is effectively at-least-once plus deduplication in practice, not a free guarantee. I'd also always include a dead letter queue with bounded retries, so a single poison-pill message can't block an entire partition's throughput, and I'd only require ordering per-entity, via partition keys, rather than globally, to avoid unnecessarily serializing unrelated work."
 

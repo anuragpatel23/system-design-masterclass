@@ -10,7 +10,18 @@ Read replicas scale read throughput by copying the same data to N machines. But 
 
 ---
 
-## 2. Sharding (Partitioning) Strategies
+## 2. Horizontal vs. Vertical Partitioning — and the Easier Middle Step: Functional Sharding
+
+"Sharding" specifically means **horizontal partitioning** (splitting *rows* of the same logical table across machines, the subject of this whole file) — but it's worth precisely distinguishing from two related, less drastic techniques that are often reached for first:
+
+- **Vertical partitioning** splits a table by *columns* rather than rows — e.g., moving a rarely-accessed, large `bio_text` column into a separate table/store from the frequently-queried `user_id, username, last_login` columns, so the hot columns stay compact and cache-friendly while the cold, large column doesn't bloat every scan of the hot table.
+- **Functional sharding (a.k.a. federation)** splits *different tables/domains* onto different physical databases — a `users` database, a separate `orders` database, a separate `payments` database — **without** sharding any single table's rows yet. This is usually a natural, low-risk consequence of decomposing a monolith into [microservices](../../../07-microservices/monolith-vs-microservices/README.md) (each service owning its own database), and it's almost always the right *first* move before reaching for true horizontal sharding of any single, still-too-large table — it buys real scale-out with far less of the cross-shard-query/transaction complexity described in §4, because queries that used to join across domains were often already being discouraged by service boundaries.
+
+**Why the distinction matters in an interview:** "how would you scale this database" has a natural escalation path — vertical partitioning and functional sharding (federation) first, since they're comparatively cheap and don't break single-row transactional guarantees or joins *within* a domain, and true horizontal sharding of a single enormous table only once a single logical table's row count or write volume specifically is the bottleneck that federation alone can't solve. Naming this order, rather than jumping straight to "we'd hash-shard the users table," is a stronger signal of having actually made this trade-off before.
+
+---
+
+## 3. Sharding (Partitioning) Strategies
 
 ### Range-Based Sharding
 Rows are partitioned by a contiguous range of the shard key (e.g., user IDs 1–1,000,000 on shard A, 1,000,001–2,000,000 on shard B).
@@ -33,7 +44,7 @@ A separate mapping service/table explicitly records which shard each key (or key
 
 ---
 
-## 3. Choosing a Shard Key — the Single Most Consequential Decision
+## 4. Choosing a Shard Key — the Single Most Consequential Decision
 
 A poorly chosen shard key is the #1 cause of sharding regret. Criteria for a good shard key:
 
@@ -43,7 +54,7 @@ A poorly chosen shard key is the #1 cause of sharding regret. Criteria for a goo
 
 ---
 
-## 4. What Breaks When You Shard (the honest cost list)
+## 5. What Breaks When You Shard (the honest cost list)
 
 - **Cross-shard joins** become expensive or impossible at the database level — must be handled in application code (fetch from multiple shards, join in memory) or avoided by design (denormalization).
 - **Cross-shard transactions** lose the simple single-node ACID guarantee — need distributed transaction patterns like two-phase commit (rare, slow) or, more commonly in practice, the **Saga pattern** (see [Saga Pattern](../../../05-distributed-systems/saga-pattern/README.md)) to maintain eventual correctness across shards.
@@ -52,7 +63,7 @@ A poorly chosen shard key is the #1 cause of sharding regret. Criteria for a goo
 
 ---
 
-## 5. Real-World Example: Instagram's Sharding of Postgres by (Logical Shard ID Embedded in the Primary Key)
+## 6. Real-World Example: Instagram's Sharding of Postgres by (Logical Shard ID Embedded in the Primary Key)
 
 Instagram's widely-cited engineering blog post describes their approach to sharding Postgres to handle a rapidly growing volume of photos/likes/comments without moving off Postgres entirely (avoiding the operational cost of a wholesale NoSQL migration):
 
@@ -64,7 +75,7 @@ Instagram's widely-cited engineering blog post describes their approach to shard
 
 ---
 
-## 6. Spring Boot Example: Routing Queries to the Correct Shard via a Custom Datasource Router
+## 7. Spring Boot Example: Routing Queries to the Correct Shard via a Custom Datasource Router
 
 ```java
 // A simple hash-based shard router: given a tenant/customer ID, determine which
@@ -157,7 +168,7 @@ public class TenantOrderService {
 
 ---
 
-## 7. Common Pitfalls
+## 8. Common Pitfalls
 
 - Sharding before it's needed — sharding is close to a one-way door operationally; it should be reached for only after replication, caching, and vertical scaling of the primary are genuinely exhausted for the write path specifically.
 - Choosing a shard key based on convenience (e.g., auto-increment row ID) rather than actual query and load patterns, leading to either constant cross-shard fan-out or a hot-shard problem.
@@ -166,7 +177,7 @@ public class TenantOrderService {
 
 ---
 
-## 8. 60-Second Interview Answer
+## 9. 60-Second Interview Answer
 
 > "Sharding splits data across multiple database instances so both read and write throughput scale horizontally, unlike replication, which only helps reads. The hardest part is choosing the shard key — it needs high cardinality, even load distribution, and alignment with the dominant query pattern, or you end up with hot shards or constant cross-shard fan-out. I'd default to consistent hashing over naive modulo hashing so that adding or removing shards doesn't require reshuffling the whole dataset. I'd also flag upfront that sharding breaks cross-shard joins, transactions, and global uniqueness constraints, pushing that complexity into the application layer — which is exactly why I'd only shard after replication and caching are genuinely exhausted, since it's one of the hardest decisions to walk back."
 

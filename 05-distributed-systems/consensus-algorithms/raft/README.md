@@ -20,16 +20,14 @@ Every node in a Raft cluster is in exactly one of three states at any time:
 - **Candidate** — a follower that has stopped hearing from a leader and is actively campaigning to become the new leader.
 - **Leader** — handles all client requests and log replication; there is **at most one leader per "term"** (defined below), enforced by the election mechanism itself.
 
-```
-        times out, starts election
-Follower ────────────────────────▶ Candidate
-   ▲                                   │  │
-   │  discovers current leader          │  │ wins election (majority votes)
-   │  or new term                       │  ▼
-   └───────────────────────────────  Leader
-                                         │
-                    discovers a node with a higher term
-                    (steps down back to Follower)
+```mermaid
+stateDiagram-v2
+    [*] --> Follower
+    Follower --> Candidate : election timeout,\nno heartbeat from leader
+    Candidate --> Leader : wins majority vote
+    Candidate --> Candidate : split vote,\ntimeout, retry with new term
+    Candidate --> Follower : discovers current leader\nor higher term
+    Leader --> Follower : discovers a node\nwith a higher term
 ```
 
 ---
@@ -43,6 +41,26 @@ Time is divided into **terms**, numbered with consecutive integers. Each term be
 ---
 
 ## 4. Leader Election — the Mechanism, Precisely
+
+```mermaid
+sequenceDiagram
+    participant N1 as Node 1 (Follower→Candidate)
+    participant N2 as Node 2
+    participant N3 as Node 3
+
+    Note over N1: Election timeout expires,<br/>no heartbeat received
+    N1->>N1: increment term, vote for self
+    N1->>N2: RequestVote(term=5, candidateId=N1, lastLogIndex, lastLogTerm)
+    N1->>N3: RequestVote(term=5, candidateId=N1, lastLogIndex, lastLogTerm)
+    Note over N2: term 5 > my term,<br/>haven't voted yet,<br/>N1's log is up-to-date
+    N2-->>N1: VoteGranted(term=5)
+    Note over N3: same checks pass
+    N3-->>N1: VoteGranted(term=5)
+    Note over N1: received majority (3 of 3)<br/>→ becomes Leader for term 5
+    N1->>N2: AppendEntries (heartbeat, empty)
+    N1->>N3: AppendEntries (heartbeat, empty)
+    Note over N2,N3: heartbeats suppress their own<br/>election timeouts
+```
 
 1. A follower's **election timeout** expires (a randomized duration, typically 150-300ms, re-randomized each time) without hearing a heartbeat from a leader.
 2. It transitions to candidate, **increments its term**, votes for itself, and sends `RequestVote` RPCs to every other node in parallel.
@@ -67,6 +85,29 @@ With `N` total nodes, a quorum of `⌊N/2⌋ + 1` guarantees this: if `2 × (⌊
 ---
 
 ## 6. Log Replication
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Leader
+    participant F1 as Follower 1
+    participant F2 as Follower 2
+
+    Client->>Leader: write(x=5)
+    Leader->>Leader: append to own log (uncommitted)
+    Leader->>F1: AppendEntries(entry: x=5)
+    Leader->>F2: AppendEntries(entry: x=5)
+    F1-->>Leader: ack (durably stored)
+    Note over Leader: majority reached (2 of 3,<br/>including self) → COMMITTED
+    Leader->>Leader: apply to state machine
+    Leader-->>Client: success
+    F2-->>Leader: ack (arrives after commit,<br/>still fine)
+    Leader->>F1: next AppendEntries includes commitIndex
+    Leader->>F2: next AppendEntries includes commitIndex
+    Note over F1,F2: followers now apply the entry<br/>to their own state machines too
+```
+
+**Take this diagram as the reference for the commit rule:** the leader declares the write successful to the client the **instant a majority acknowledges** (here, the leader itself plus Follower 1 — it doesn't wait for Follower 2), which is precisely the quorum-based durability/latency trade-off from §5, and exactly why one slow or dead follower can never block writes.
 
 Once elected, the leader is the **only** node that accepts client write requests. For each write:
 

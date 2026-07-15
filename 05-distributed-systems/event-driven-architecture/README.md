@@ -11,6 +11,27 @@
 
 **Why this distinction matters architecturally:** a system built around commands has the sender's code explicitly naming and depending on the receiver (`orderService.calls(paymentService)`), which is exactly the tight coupling EDA exists to eliminate. A system built around events lets new subscribers be added **with zero changes to the publisher** — this is precisely the [Observer pattern](../../04-low-level-design/design-patterns/behavioral/README.md#3-observer) from Low-Level Design, generalized from a single process to an entire distributed system, and it's worth explicitly naming that parallel in an interview.
 
+```mermaid
+graph LR
+    OrderSvc[Order Service]
+    Bus[[Event Bus / Log]]
+    Fraud[Fraud Detection<br/>added later, ZERO changes to publisher]
+    Analytics[Analytics Service]
+    Inventory[Inventory Service]
+    Notif[Notification Service]
+
+    OrderSvc -->|publishes OrderPlaced| Bus
+    Bus -.->|subscribes| Fraud
+    Bus -.->|subscribes| Analytics
+    Bus -.->|subscribes| Inventory
+    Bus -.->|subscribes| Notif
+
+    style OrderSvc fill:#a8d5ff,stroke:#333
+    style Bus fill:#c9f7d1,stroke:#333
+```
+
+**Take this as the reference topology** — `OrderSvc` has no reference to, dependency on, or even awareness of any of the four subscribers. Notice `Fraud` is explicitly labeled "added later" — that's the whole architectural point: a new consumer of an existing event stream requires zero code changes, zero redeploys, and zero coordination with the publisher, which is categorically different from a command-based system where adding a new caller means the publisher's code (or at least its deployment) has to change to know about it.
+
 ---
 
 ## 2. Core Benefits (and Why Each One Is True, Not Just Asserted)
@@ -119,7 +140,35 @@ public class FraudDetectionConsumer {
 }
 ```
 
-**The subtle trap worth naming (the "dual write" problem):** the code above writes to the database (`orderRepository.save`) and then separately publishes to Kafka (`kafkaTemplate.send`) — these are **two independent operations against two independent systems**, and if the process crashes between them (after the DB commit, before the Kafka publish succeeds), the order exists but **no event was ever published**, silently breaking every downstream consumer's expectation that `OrderPlaced` fires for every order. The robust, production-grade fix is the **Transactional Outbox pattern**: write the event to an "outbox" table in the **same local database transaction** as the order itself (making it atomic with the business write, since it's now just another row in the same database), and have a separate, reliable process (a change-data-capture connector, or a polling publisher) read from that outbox table and publish to Kafka, retrying until it succeeds — this converts "publish to Kafka" from a fragile, transaction-external side effect into an eventually-guaranteed, at-least-once-delivered outcome, at the cost of a small publishing delay and the added outbox-table/relay infrastructure. **Naming the dual-write problem and the Transactional Outbox pattern as its fix, unprompted, is a strong senior-level signal** in any event-driven design discussion.
+**The subtle trap worth naming (the "dual write" problem):** the code above writes to the database (`orderRepository.save`) and then separately publishes to Kafka (`kafkaTemplate.send`) — these are **two independent operations against two independent systems**, and if the process crashes between them (after the DB commit, before the Kafka publish succeeds), the order exists but **no event was ever published**, silently breaking every downstream consumer's expectation that `OrderPlaced` fires for every order.
+
+```mermaid
+sequenceDiagram
+    participant OrderSvc as Order Service
+    participant DB as Order DB
+    participant Kafka as Kafka
+
+    rect rgb(255, 230, 230)
+    Note over OrderSvc,Kafka: THE DUAL-WRITE PROBLEM
+    OrderSvc->>DB: save(order) — COMMITS
+    Note over OrderSvc: 💥 process crashes here
+    OrderSvc--xKafka: send(OrderPlaced) — NEVER SENT
+    Note over Kafka: downstream consumers never learn<br/>this order was ever placed
+    end
+
+    rect rgb(230, 255, 230)
+    Note over OrderSvc,Kafka: THE FIX — Transactional Outbox
+    OrderSvc->>DB: BEGIN TRANSACTION
+    OrderSvc->>DB: save(order)
+    OrderSvc->>DB: save(outbox_row: OrderPlaced)
+    OrderSvc->>DB: COMMIT — both rows atomic, same local transaction
+    Note over DB: separate relay process polls/CDC-taps the outbox table
+    DB->>Kafka: relay publishes OrderPlaced (retries until success)
+    Kafka-->>DB: mark outbox row as published
+    end
+```
+
+The robust, production-grade fix is the **Transactional Outbox pattern**: write the event to an "outbox" table in the **same local database transaction** as the order itself (making it atomic with the business write, since it's now just another row in the same database), and have a separate, reliable process (a change-data-capture connector, or a polling publisher) read from that outbox table and publish to Kafka, retrying until it succeeds — this converts "publish to Kafka" from a fragile, transaction-external side effect into an eventually-guaranteed, at-least-once-delivered outcome, at the cost of a small publishing delay and the added outbox-table/relay infrastructure. **Naming the dual-write problem and the Transactional Outbox pattern as its fix, unprompted, is a strong senior-level signal** in any event-driven design discussion.
 
 ---
 

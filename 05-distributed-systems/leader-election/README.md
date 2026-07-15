@@ -37,15 +37,24 @@ Even with correct leader election, a subtle danger remains: a leader that has be
 
 **The fix: fencing tokens.** Every time leadership changes, the coordination service issues a **monotonically increasing fencing token** along with the new leadership claim. Every downstream resource the leader writes to must be built to **reject any write accompanied by a fencing token lower than the highest one it has already seen.** This means even if a stale former leader, unaware it's been superseded, attempts a write, the resource itself rejects it (because it already saw a higher fencing token from the new, legitimate leader), **rather than relying on the stale leader to somehow realize on its own that it's no longer in charge** — the correctness burden is shifted to the resource being protected, which is a strictly safer place for it to live, since it doesn't depend on the possibly-confused/partitioned former leader behaving correctly.
 
-```
-Leader A elected, fencing token = 5
-Leader A pauses for a long GC pause...
-                                          ...meanwhile, Leader A's lease expires
-                                          Leader B is elected, fencing token = 6
-                                          Leader B writes to Resource X with token 6
-                                          Resource X: "highest token seen so far = 6" -- accepted
-Leader A resumes, unaware it's been superseded, tries to write with its OLD token = 5
-Resource X: "5 < 6, the highest I've already seen -- REJECTED"
+```mermaid
+sequenceDiagram
+    participant A as Leader A
+    participant Coord as Coordination Service<br/>(ZooKeeper/etcd)
+    participant B as Leader B
+    participant X as Resource X
+
+    Note over A,Coord: Leader A elected, fencing token = 5
+    Note over A: Leader A enters a long GC pause...
+    Note over Coord: ...meanwhile A's lease/session expires
+    Coord->>B: B is elected, fencing token = 6
+    B->>X: write(data, token=6)
+    Note over X: highest token seen so far = 6
+    X-->>B: accepted
+    Note over A: A resumes, unaware it's been superseded
+    A->>X: write(data, token=5)
+    Note over X: 5 < 6 (highest already seen)
+    X-->>A: REJECTED
 ```
 
 **This exact scenario — "what if the old leader doesn't know it's been replaced yet" — is one of the single most common staff-level follow-up questions on this topic, and fencing tokens are the correct, complete answer**, distinct from (and a necessary complement to) the election mechanism itself, which only handles *choosing* a new leader correctly, not *preventing the old one from acting* after being superseded.

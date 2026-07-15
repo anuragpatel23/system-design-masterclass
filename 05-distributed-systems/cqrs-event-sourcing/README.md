@@ -11,14 +11,23 @@ In a traditional CRUD architecture, the same model (often the same database tabl
 - **The Command side** handles writes: validates business rules, enforces invariants, and persists changes — typically normalized, optimized for correctness and transactional integrity.
 - **The Query side** handles reads: a separately-optimized, often denormalized model, shaped specifically around how the data needs to be *displayed or queried*, not how it needs to be *written*.
 
-```
-Write path:  Client ──▶ Command Handler ──▶ validates + persists to WRITE model
-                                                      │
-                                          (asynchronously, or via events)
-                                                      ▼
-Read path:   Client ──▶ Query Handler ──▶ reads from a separately-shaped
-                                            READ model, optimized for the
-                                            actual query patterns needed
+```mermaid
+graph LR
+    Client1([Client])
+    Client2([Client])
+    CmdHandler[Command Handler]
+    WriteModel[(Write Model<br/>normalized, transactional)]
+    QueryHandler[Query Handler]
+    ReadModel[(Read Model<br/>denormalized, query-optimized)]
+
+    Client1 -->|write request| CmdHandler
+    CmdHandler -->|"validate + persist"| WriteModel
+    WriteModel -.->|"async, via events"| ReadModel
+    Client2 -->|read request| QueryHandler
+    QueryHandler -->|"single cheap lookup"| ReadModel
+
+    style WriteModel fill:#a8d5ff,stroke:#333
+    style ReadModel fill:#f9d976,stroke:#333
 ```
 
 **Why this is valuable, precisely:** the write and read models often have **genuinely conflicting optimal shapes**. A write model for an e-commerce order wants strict normalization (an `orders` table, a separate `order_items` table, foreign keys enforcing referential integrity) to prevent invalid states. A read model serving "show me this customer's order history with product names, images, and current shipping status all in one response" wants a **denormalized, pre-joined, possibly pre-aggregated** shape specifically so that common queries are cheap single-lookups rather than expensive multi-table joins computed on every request. Forcing one shared model to serve both needs means compromising one or both — CQRS explicitly rejects that compromise by allowing each side to be optimized independently.
@@ -37,19 +46,19 @@ CQRS adds real complexity — two models to build, test, and keep in sync (often
 
 In a traditional model, an entity's current state is stored directly (e.g., an `orders` table row with a `status` column that gets overwritten on each update — the history of *how* it got to its current status is lost unless separately logged). **Event sourcing instead stores every state-changing event** (`OrderPlaced`, `OrderPaid`, `OrderShipped`, `OrderCancelled`) as an **immutable, append-only sequence**, and the entity's current state is computed by **replaying all its events in order**.
 
-```
-Traditional model:
-  orders table:  { orderId: 123, status: "SHIPPED", total: 50.00 }
-  -- history of HOW it got to SHIPPED is gone unless logged elsewhere
+```mermaid
+graph TD
+    subgraph Traditional["Traditional Model"]
+        Row["orders table:<br/>{ orderId: 123, status: SHIPPED, total: 50.00 }<br/><i>history of HOW it got here is gone</i>"]
+    end
 
-Event-sourced model:
-  event log for order 123:
-    1. OrderPlaced   { total: 50.00 }
-    2. OrderPaid     { paymentId: "pay_1" }
-    3. OrderShipped  { trackingNumber: "1Z..." }
-
-  Current state = fold/replay all events in order:
-    status = "SHIPPED" (the result of applying all 3 events in sequence)
+    subgraph EventSourced["Event-Sourced Model"]
+        E1["1. OrderPlaced { total: 50.00 }"]
+        E2["2. OrderPaid { paymentId: pay_1 }"]
+        E3["3. OrderShipped { trackingNumber: 1Z... }"]
+        State["Current state = fold/replay all events:<br/>status = SHIPPED"]
+        E1 --> E2 --> E3 -->|replay in order| State
+    end
 ```
 
 **This is precisely the [double-entry ledger](../../03-high-level-design/payment-system/README.md#3-component-deep-dive-the-double-entry-ledger) principle from the Payment System HLD, generalized from "money movement" to "any entity's entire lifecycle"** — the same reasoning applies: an immutable log of what happened is more auditable, more debuggable (you can literally see and replay the exact sequence of events that led to any given state, including for a state that turned out to reveal a bug), and structurally prevents a whole class of "silent state corruption" bugs, compared to a single mutable row that simply reflects whatever it was last overwritten to.

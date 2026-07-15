@@ -12,6 +12,33 @@ The original, simplest form of Paxos ("single-decree Paxos") solves consensus on
 
 ## 2. The Two Phases of Single-Decree Paxos
 
+```mermaid
+sequenceDiagram
+    participant P as Proposer
+    participant A1 as Acceptor 1
+    participant A2 as Acceptor 2
+    participant A3 as Acceptor 3
+
+    Note over P: Phase 1 — Prepare/Promise
+    P->>A1: Prepare(n=5)
+    P->>A2: Prepare(n=5)
+    P->>A3: Prepare(n=5)
+    Note over A2: A2 had already accepted<br/>value="X" under proposal n=3
+    A1-->>P: Promise(n=5, no prior accepted value)
+    A2-->>P: Promise(n=5, prior accepted: n=3, value="X")
+    Note over P: majority promised (2 of 3) --<br/>MUST adopt "X", the highest-numbered<br/>prior accepted value, discarding own intended value
+
+    Note over P: Phase 2 — Accept/Accepted
+    P->>A1: Accept(n=5, value="X")
+    P->>A2: Accept(n=5, value="X")
+    P->>A3: Accept(n=5, value="X")
+    A1-->>P: Accepted(n=5, "X")
+    A2-->>P: Accepted(n=5, "X")
+    Note over P: majority accepted (2 of 3) --<br/>"X" is now CHOSEN, permanently
+```
+
+**Take this diagram as the base for the whole algorithm** — the scenario is deliberately drawn with Acceptor 2 already holding a prior accepted value, because that's the one situation that makes Paxos's safety rule non-optional rather than a nice-to-have: the proposer's *own* intended value is silently discarded in favor of "X" the moment Phase 1 reveals it, which is exactly the rule explained below.
+
 Paxos has three logical roles — **Proposers** (propose values), **Acceptors** (vote on proposals), **Learners** (learn the final agreed value) — though in practice a single node often plays multiple roles simultaneously.
 
 ### Phase 1: Prepare / Promise

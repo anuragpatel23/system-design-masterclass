@@ -6,24 +6,31 @@
 
 ## 1. The Core Idea
 
-```
-Instead of ONE atomic distributed transaction across services A, B, C:
+```mermaid
+sequenceDiagram
+    participant O as Orchestrator/Caller
+    participant A as Service A
+    participant B as Service B
+    participant C as Service C
 
-  A.commit() ── B.commit() ── C.commit()      <- 2PC tries to make this all-or-nothing
+    Note over O,C: Happy path — each step is its OWN local ACID transaction
+    O->>A: commit()
+    A-->>O: success
+    O->>B: commit()
+    B-->>O: success
+    O->>C: commit()
+    C-->>O: success
 
-A saga does this instead:
-
-  A.commit() ── B.commit() ── C.commit()      <- happy path: each step is its OWN
-                                                   local ACID transaction, committed
-                                                   independently and immediately
-
-  If C fails:
-  A.commit() ── B.commit() ── C.FAILS
-                    │
-              B.compensate()   <- undo B's effect
-                    │
-              A.compensate()   <- undo A's effect
-                                   (in REVERSE order of the original steps)
+    Note over O,C: Failure path — C fails after A and B already committed
+    O->>A: commit()
+    A-->>O: success
+    O->>B: commit()
+    B-->>O: success
+    O->>C: commit()
+    C-->>O: FAILS
+    Note over O: unwind in REVERSE order
+    O->>B: compensate()
+    O->>A: compensate()
 ```
 
 **The fundamental trade-off being made, stated precisely:** a saga gives up the *atomicity* guarantee (there is a real window of time where A and B have committed but C hasn't yet — the system is observably in an intermediate, "in-progress" state) in exchange for **not requiring any participant to hold locks across a network round trip**, and for **each service remaining independently available** — no coordinator can block the whole operation by crashing. This is a direct, deliberate instance of choosing eventual consistency (per [Consistency Models](../../01-foundations/consistency-models/README.md)) over strict, instantaneous consistency, specifically because instantaneous cross-service consistency (2PC) has an unacceptable availability cost at real production scale.
@@ -35,23 +42,30 @@ A saga does this instead:
 ### Choreography (Event-Driven, No Central Coordinator)
 Each service publishes an event when its local transaction completes; other services subscribe to the events relevant to them and react by performing their own local transaction (and publishing their own resulting event).
 
-```
-Order Service: creates order (PENDING) ──▶ publishes "OrderCreated"
-                                                    │
-Inventory Service (subscribes to "OrderCreated"):
-   reserves stock ──▶ publishes "StockReserved" (or "StockReservationFailed")
-                                                    │
-Payment Service (subscribes to "StockReserved"):
-   charges customer ──▶ publishes "PaymentCompleted" (or "PaymentFailed")
-                                                    │
-Order Service (subscribes to "PaymentCompleted"):
-   marks order CONFIRMED
+```mermaid
+sequenceDiagram
+    participant Order as Order Service
+    participant MQ as Event Bus
+    participant Inv as Inventory Service
+    participant Pay as Payment Service
 
--- IF PaymentFailed is published instead --
-Inventory Service (subscribes to "PaymentFailed"):
-   releases the reserved stock (COMPENSATING action)
-Order Service (subscribes to "PaymentFailed"):
-   marks order CANCELLED
+    Order->>MQ: publish "OrderCreated"
+    MQ->>Inv: OrderCreated
+    Inv->>Inv: reserve stock
+    Inv->>MQ: publish "StockReserved"
+    MQ->>Pay: StockReserved
+    Pay->>Pay: charge customer
+    alt payment succeeds
+        Pay->>MQ: publish "PaymentCompleted"
+        MQ->>Order: PaymentCompleted
+        Order->>Order: mark order CONFIRMED
+    else payment fails
+        Pay->>MQ: publish "PaymentFailed"
+        MQ->>Inv: PaymentFailed
+        Inv->>Inv: release reserved stock (COMPENSATING)
+        MQ->>Order: PaymentFailed
+        Order->>Order: mark order CANCELLED
+    end
 ```
 
 - **Pros:** no single point of coordination/failure; each service only needs to know about the events it cares about, not the whole saga's shape — genuinely loosely coupled, directly building on the [pub/sub pattern](../../02-building-blocks/message-queues/README.md#1-messaging-patterns) from Message Queues.
@@ -60,24 +74,21 @@ Order Service (subscribes to "PaymentFailed"):
 ### Orchestration (a Central Saga Orchestrator)
 A dedicated orchestrator component explicitly calls each service in sequence (or triggers each step and waits for confirmation), and is exclusively in charge of running compensating actions in reverse order if any step fails.
 
-```
-                     ┌─────────────────────────┐
-                     │   Saga Orchestrator      │
-                     │  (explicit state machine  │
-                     │   of the WHOLE saga)      │
-                     └────────────┬─────────────┘
-        1. reserve stock ─────────┤
-        (Inventory Service)        │
-                                   │  on success, continue
-        2. charge payment ────────┤
-        (Payment Service)          │
-                                   │  on FAILURE:
-                                   ▼
-                     Orchestrator explicitly calls
-                     compensating actions in REVERSE:
-                       - refund payment (if it had succeeded)
-                       - release reserved stock
-                       - mark order CANCELLED
+```mermaid
+sequenceDiagram
+    participant O as Saga Orchestrator<br/>(explicit state machine)
+    participant Inv as Inventory Service
+    participant Pay as Payment Service
+
+    O->>Inv: 1. reserve stock
+    Inv-->>O: success
+    O->>Pay: 2. charge payment
+    Pay-->>O: FAILURE
+
+    Note over O: explicitly calls compensating<br/>actions in REVERSE order
+    O->>Pay: refund payment (if it had succeeded)
+    O->>Inv: release reserved stock
+    O->>O: mark order CANCELLED
 ```
 
 - **Pros:** the entire saga's logic lives in **one place** — readable, testable, and debuggable as a single unit; this single orchestrator is also the natural place to add cross-cutting concerns like timeouts, retries, and monitoring for the whole flow.

@@ -27,18 +27,45 @@ The coordinator sends a `PREPARE` message to every participant. Each participant
 - If **all** participants voted `YES`, the coordinator sends `COMMIT` to everyone, and each participant finalizes its change and releases locks.
 - If **any** participant voted `NO` (or timed out), the coordinator sends `ABORT` to everyone, and each participant rolls back.
 
-```
-Coordinator          Participant A        Participant B
-     │──PREPARE────────────▶│                    │
-     │──PREPARE─────────────────────────────────▶│
-     │◀─────────YES──────────│                    │
-     │◀─────────────────────────────YES──────────│
-     │ (all voted YES → decide COMMIT)            │
-     │──COMMIT─────────────▶│                    │
-     │──COMMIT──────────────────────────────────▶│
+```mermaid
+sequenceDiagram
+    participant C as Coordinator
+    participant A as Participant A
+    participant B as Participant B
+
+    Note over C,B: Phase 1 — Prepare (Voting)
+    C->>A: PREPARE
+    C->>B: PREPARE
+    A->>A: do the work, log durably, LOCK resources
+    B->>B: do the work, log durably, LOCK resources
+    A-->>C: YES
+    B-->>C: YES
+    Note over C: all voted YES → decide COMMIT
+
+    Note over C,B: Phase 2 — Commit
+    C->>A: COMMIT
+    C->>B: COMMIT
+    A->>A: finalize, release locks
+    B->>B: finalize, release locks
 ```
 
 ### The Fatal Flaw: the Blocking Problem
+
+```mermaid
+sequenceDiagram
+    participant C as Coordinator
+    participant A as Participant A
+    participant B as Participant B
+
+    C->>A: PREPARE
+    C->>B: PREPARE
+    A-->>C: YES (locks held)
+    B-->>C: YES (locks held)
+    Note over C: CRASHES before sending<br/>the Phase 2 decision
+    Note over A,B: Both participants already voted YES --<br/>can't unilaterally abort (coordinator may have<br/>told the OTHER one to commit) and can't<br/>commit without the coordinator's decision
+    Note over A,B: STUCK holding locks indefinitely,<br/>blocking any other transaction<br/>waiting on the same data
+```
+
 If the **coordinator crashes after Phase 1 but before sending the Phase 2 decision**, every participant that voted `YES` is left **holding its locks indefinitely**, unable to unilaterally decide whether to commit or abort — it already promised it *could* commit (voted YES), so it can't safely abort on its own (the coordinator might have already told other participants to commit), and it has no way to know the actual decision without the coordinator. **This is 2PC's defining weakness: participants can be blocked, holding locks and unable to make progress, for as long as the coordinator remains unavailable** — directly sacrificing availability (see [CAP Theorem](../../01-foundations/cap-theorem/README.md)) for the sake of strict atomicity, and doing so in a way that can cascade (locked resources block *other*, unrelated transactions waiting on the same data).
 
 This blocking behavior is precisely why 2PC is **rarely used directly across service boundaries in modern microservice architectures** — a single slow or crashed coordinator can freeze a meaningful portion of a distributed system's throughput, which is an unacceptable availability cost for most real products, even though the atomicity guarantee itself is appealing.

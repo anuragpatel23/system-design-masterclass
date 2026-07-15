@@ -8,6 +8,23 @@
 
 **Problem it solves:** make an existing class's interface compatible with what calling code expects, without modifying the existing class — essential when integrating a third-party library or legacy code whose interface doesn't match your system's expectations.
 
+```mermaid
+classDiagram
+    class PaymentProcessor {
+        <<interface>>
+        +charge(BigDecimal, String) PaymentResult
+    }
+    class LegacyPaymentGatewaySDK {
+        +processTransaction(int, String) LegacyResponse
+    }
+    class LegacyPaymentAdapter {
+        -LegacyPaymentGatewaySDK legacySdk
+        +charge(BigDecimal, String) PaymentResult
+    }
+    PaymentProcessor <|.. LegacyPaymentAdapter
+    LegacyPaymentAdapter --> LegacyPaymentGatewaySDK : translates calls to
+```
+
 ```java
 // The interface OUR system expects, used throughout our payment code.
 public interface PaymentProcessor {
@@ -43,6 +60,26 @@ public class LegacyPaymentAdapter implements PaymentProcessor {
 ## 2. Decorator
 
 **Problem it solves:** attach additional responsibilities to an object **dynamically**, without modifying its class or resorting to a combinatorial explosion of subclasses (e.g., needing `LoggingCachedRateLimitedService`, `CachedRateLimitedService`, `LoggingRateLimitedService`, ... for every combination of optional behaviors).
+
+```mermaid
+classDiagram
+    class DataFetcher {
+        <<interface>>
+        +fetch(String) String
+    }
+    class DatabaseFetcher
+    class CachingDecorator {
+        -DataFetcher delegate
+    }
+    class LoggingDecorator {
+        -DataFetcher delegate
+    }
+    DataFetcher <|.. DatabaseFetcher
+    DataFetcher <|.. CachingDecorator
+    DataFetcher <|.. LoggingDecorator
+    CachingDecorator --> DataFetcher : wraps
+    LoggingDecorator --> DataFetcher : wraps
+```
 
 ```java
 public interface DataFetcher {
@@ -94,6 +131,25 @@ DataFetcher fetcher = new LoggingDecorator(new CachingDecorator(new DatabaseFetc
 
 **Problem it solves:** provide a single, simplified interface over a complex subsystem of many interacting classes, so calling code doesn't need to understand or coordinate all of them directly.
 
+```mermaid
+classDiagram
+    class OrderFacade {
+        -InventoryService inventoryService
+        -PaymentService paymentService
+        -ShippingService shippingService
+        -NotificationService notificationService
+        +placeOrder(OrderRequest) OrderResult
+    }
+    class InventoryService
+    class PaymentService
+    class ShippingService
+    class NotificationService
+    OrderFacade --> InventoryService : coordinates
+    OrderFacade --> PaymentService : coordinates
+    OrderFacade --> ShippingService : coordinates
+    OrderFacade --> NotificationService : coordinates
+```
+
 ```java
 // A complex subsystem with several classes that must be coordinated in the right order.
 public class OrderFacade {
@@ -125,6 +181,24 @@ public class OrderFacade {
 ## 4. Composite
 
 **Problem it solves:** treat individual objects and compositions (groups) of objects **uniformly**, through a shared interface — ideal for tree-structured, part-whole hierarchies (file systems, UI component trees, organizational hierarchies).
+
+```mermaid
+classDiagram
+    class FileSystemNode {
+        <<interface>>
+        +getSize() long
+    }
+    class File {
+        -long size
+    }
+    class Directory {
+        -List~FileSystemNode~ children
+        +add(FileSystemNode) void
+    }
+    FileSystemNode <|.. File
+    FileSystemNode <|.. Directory
+    Directory "1" o-- "many" FileSystemNode : contains files AND directories
+```
 
 ```java
 public interface FileSystemNode {
@@ -158,6 +232,24 @@ public class Directory implements FileSystemNode {
 ## 5. Proxy
 
 **Problem it solves:** provide a stand-in/surrogate for another object that controls access to it — adding a layer of indirection for lazy loading, access control, caching, or remote-object representation, **without the calling code needing to know a proxy is involved at all.**
+
+```mermaid
+classDiagram
+    class Image {
+        <<interface>>
+        +display() void
+    }
+    class HighResImage {
+        -String path
+    }
+    class LazyImageProxy {
+        -String path
+        -HighResImage realImage
+    }
+    Image <|.. HighResImage
+    Image <|.. LazyImageProxy
+    LazyImageProxy --> HighResImage : creates on first display() only
+```
 
 ```java
 public interface Image {

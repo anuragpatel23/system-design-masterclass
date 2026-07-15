@@ -16,32 +16,97 @@
 
 ## 2. Class Design
 
+```mermaid
+classDiagram
+    class Game {
+        -Board board
+        -Player[2] players
+        -GameState state
+        -PieceColor currentTurn
+        +makeMove(Position, Position) MoveResult
+        +undo() void
+    }
+    class Board {
+        -Square[8][8] grid
+        -MoveHistory history
+        +getPieceAt(Position) Optional~Piece~
+        +isSquareUnderAttack(Position, PieceColor) boolean
+    }
+    class Square {
+        -Optional~Piece~ occupant
+    }
+    class Piece {
+        <<abstract>>
+        -PieceColor color
+        -Position position
+        +getPossibleMoves(Board) List~Position~
+    }
+    class King
+    class Queen
+    class Rook
+    class Bishop
+    class Knight
+    class Pawn
+    class Move {
+        <<Command>>
+        -Position from
+        -Position to
+        -Piece movedPiece
+        -Piece capturedPiece
+        +execute() void
+        +undo() void
+    }
+    class MoveHistory {
+        -Stack~Move~ executedMoves
+        +push(Move) void
+        +popLast() Move
+    }
+    class GameState {
+        <<State>>
+        <<enumeration>>
+        IN_PROGRESS
+        CHECK
+        CHECKMATE
+        STALEMATE
+    }
+    class Player {
+        -PieceColor color
+    }
+
+    Game "1" *-- "1" Board
+    Game "1" *-- "2" Player
+    Game "1" --> "1" GameState : current
+    Board "1" *-- "64" Square
+    Board "1" *-- "1" MoveHistory
+    Square "1" o-- "0..1" Piece
+    Piece <|-- King
+    Piece <|-- Queen
+    Piece <|-- Rook
+    Piece <|-- Bishop
+    Piece <|-- Knight
+    Piece <|-- Pawn
+    MoveHistory "1" *-- "many" Move : stack of
 ```
-Board
- ├── holds an 8x8 grid of ── Square (each holding an Optional<Piece>)
- └── uses ── MoveHistory (Command pattern — stack of executed Move commands)
 
-Piece (abstract)
- ├── King, Queen, Rook, Bishop, Knight, Pawn
- └── each implements ── getPossibleMoves(Board, Position)
-
-Move (Command pattern)
- ├── execute()
- └── undo()
-
-Player
- └── has a ── PieceColor (WHITE / BLACK)
-
-Game
- ├── has a ── Board
- ├── has two ── Player
- ├── has a ── GameState (State pattern — IN_PROGRESS / CHECK / CHECKMATE / STALEMATE)
- └── has a ── current turn (PieceColor)
-```
+**Take this diagram as the base for the whole design** — two relationships carry the entire design's intent. First, `Piece <|-- King/Queen/.../Pawn` (inheritance, not a `switch` statement) is what §3 is about: each subclass answers "where can I legally move from here" for itself. Second, `MoveHistory "1" *-- "many" Move`, combined with `Move`'s own `execute()`/`undo()` methods, is the Command pattern (§5) made visual — history isn't a log of *descriptions* of what happened, it's a stack of *executable, reversible objects*.
 
 ---
 
-## 3. Piece Polymorphism — the Core Design Decision
+## 3. Key Classes & Interfaces — What Each One Is Responsible For
+
+| Class | Responsibility | Why It's Shaped This Way |
+|---|---|---|
+| `Game` | Top-level orchestrator — owns the board, both players, current turn, and game state | The only class client code talks to; `makeMove` is the single public entry point that internally coordinates validation, execution, and state transition |
+| `Board` | Owns the 8×8 grid and the move history; answers spatial queries like "is this square under attack" | Deliberately holds no turn/game-state logic of its own — it's a spatial data structure, not a rules engine |
+| `Piece` (abstract) + 6 subtypes | Each subtype knows its own legal-move generation rules | This is the polymorphism decision from §3 — the alternative (one `switch` in `Board`) was rejected specifically because it doesn't scale to special-move extensions (castling, en passant) without bloating a central class |
+| `Move` | An executable, reversible command — not just a data record of "piece X went from A to B" | Storing `execute()`/`undo()` behavior on the object itself, rather than reconstructing undo logic externally from a move description, is what makes undo/history trivial (§5) |
+| `MoveHistory` | A stack of executed `Move` commands | A stack is the natural structure for "undo the most recent thing," and pairs directly with the Command pattern's reversibility |
+| `GameState` | Tracks whether the game is in progress, check, checkmate, or stalemate | Modeled explicitly as a State-pattern-managed enum rather than scattered boolean flags (`isInCheck`, `isCheckmate`, ...) that could drift out of sync with each other |
+| `Player` | Represents one side, holding its color | Kept minimal — a player doesn't own pieces directly; ownership is inferred from `PieceColor`, avoiding a second, redundant piece-tracking list |
+
+---
+
+## 4. Piece Polymorphism — the Core Design Decision
 
 Rather than a `Board` class containing a giant `switch (piece.getType())` to compute legal moves for every piece type, **each `Piece` subclass knows its own movement rules**:
 
@@ -117,7 +182,7 @@ public class Knight extends Piece {
 
 ---
 
-## 4. Move Validation: Two Distinct Layers (a Commonly Missed Subtlety)
+## 5. Move Validation: Two Distinct Layers (a Commonly Missed Subtlety)
 
 A move being "geometrically possible" for a piece (from `getPossibleMoves`) is **necessarily insufficient** on its own — chess has a second, independent validation layer: **a move cannot leave your own king in check**, even if it's otherwise geometrically legal for that piece.
 
@@ -156,7 +221,7 @@ public class MoveValidator {
 
 ---
 
-## 5. The Command Pattern for Moves (Undo/History)
+## 6. The Command Pattern for Moves (Undo/History)
 
 ```java
 public class Move {
@@ -208,7 +273,7 @@ public class MoveHistory {
 
 ---
 
-## 6. Game State as a State Machine
+## 7. Game State as a State Machine
 
 ```java
 public interface GameState {
@@ -239,7 +304,7 @@ This directly reuses the [State pattern](../design-patterns/behavioral/README.md
 
 ---
 
-## 7. Extensibility Walkthrough
+## 8. Extensibility Walkthrough
 
 | Follow-up | How this design absorbs it |
 |---|---|
@@ -250,7 +315,7 @@ This directly reuses the [State pattern](../design-patterns/behavioral/README.md
 
 ---
 
-## 8. 60-Second Interview Answer
+## 9. 60-Second Interview Answer
 
 > "I'd give each piece type its own subclass implementing a shared `getPossibleMoves` method, so movement rules are polymorphic rather than a giant switch statement in the Board class — adding a new piece type, which comes up in chess variants, means one new subclass and zero changes anywhere else. Move validation has two distinct layers people often conflate: whether a move is geometrically legal for that piece, and separately, whether making it would leave your own king in check — the second one requires speculatively executing the move, checking, and reverting, which is exactly why I'd model every move as a Command object with symmetric execute and undo methods, rather than directly mutating the board with no way back. That same Command structure gives move history and the undo feature essentially for free, as a side effect of solving the check-validation problem correctly. Game status — check, checkmate, stalemate — I'd model as an explicit State machine, computed fresh after each move rather than tracked as loose boolean flags that could drift out of sync with the actual board."
 

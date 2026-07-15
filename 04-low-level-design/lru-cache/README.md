@@ -23,6 +23,33 @@
 
 ## 3. Class Design
 
+```mermaid
+classDiagram
+    class LRUCache~K,V~ {
+        -int capacity
+        -Map~K, Node~K,V~~ cache
+        -Node~K,V~ head
+        -Node~K,V~ tail
+        +get(K key) V
+        +put(K key, V value) void
+        -moveToFront(Node) void
+        -evictLRU() void
+        -addToFront(Node) void
+        -removeNode(Node) void
+    }
+    class Node~K,V~ {
+        -K key
+        -V value
+        -Node prev
+        -Node next
+    }
+    LRUCache "1" o-- "0..capacity" Node : hash map values reference
+    Node "1" --> "0..1" Node : next
+    Node "1" --> "0..1" Node : prev
+```
+
+**Take this diagram as the base for reasoning about every operation:** the `o--` (aggregation) from `LRUCache` to `Node` is the whole trick — the hash map doesn't store values directly, it stores **references into the same linked list nodes** the list itself is threading together, so a hash map lookup and a linked-list splice operate on the *identical* object. That single shared-reference relationship is what collapses two separate O(n) problems (find-by-key, find-least-recently-used) into two O(1) ones.
+
 ```java
 public class LRUCache<K, V> {
 

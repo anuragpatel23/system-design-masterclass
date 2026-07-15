@@ -16,27 +16,79 @@
 
 ## 2. Class Design
 
-```
-ElevatorController
- ├── manages many ── Elevator
- │                      ├── has a ── ElevatorState (interface — State pattern)
- │                      │              ├── IdleState
- │                      │              ├── MovingUpState
- │                      │              ├── MovingDownState
- │                      │              └── DoorOpenState
- │                      └── has a ── SchedulingStrategy (interface — Strategy pattern,
- │                                     for WITHIN a single elevator's request ordering)
- └── uses ── ElevatorSelectionStrategy (interface — Strategy pattern,
-              for WHICH elevator services a new request, in a multi-elevator building)
+```mermaid
+classDiagram
+    class ElevatorController {
+        -List~Elevator~ elevators
+        -ElevatorSelectionStrategy selectionStrategy
+        +handleExternalRequest(ExternalRequest) void
+    }
+    class Elevator {
+        -int id
+        -int currentFloor
+        -ElevatorState state
+        -SchedulingStrategy schedulingStrategy
+        -TreeSet~Integer~ pendingStops
+        +handleInternalRequest(InternalRequest) void
+        +step() void
+    }
+    class ElevatorState {
+        <<interface, State>>
+        +handle(Elevator) void
+    }
+    class IdleState
+    class MovingUpState
+    class MovingDownState
+    class DoorOpenState
+    class SchedulingStrategy {
+        <<interface, Strategy>>
+        +nextStop(TreeSet~Integer~, int, Direction) int
+    }
+    class ElevatorSelectionStrategy {
+        <<interface, Strategy>>
+        +selectElevator(List~Elevator~, ExternalRequest) Elevator
+    }
+    class Request {
+        <<abstract>>
+        -int floor
+    }
+    class ExternalRequest {
+        -Direction direction
+    }
+    class InternalRequest {
+        -int destinationFloor
+    }
 
-Request (abstract)
- ├── ExternalRequest (floor + direction, from a hallway call button)
- └── InternalRequest (destination floor, from inside the elevator car)
+    ElevatorController "1" *-- "many" Elevator : manages
+    ElevatorController ..> ElevatorSelectionStrategy : uses
+    Elevator "1" --> "1" ElevatorState : current
+    Elevator ..> SchedulingStrategy : uses
+    ElevatorState <|.. IdleState
+    ElevatorState <|.. MovingUpState
+    ElevatorState <|.. MovingDownState
+    ElevatorState <|.. DoorOpenState
+    Request <|-- ExternalRequest
+    Request <|-- InternalRequest
 ```
+
+**Take this diagram as the base for the whole design** — notice there are **two separate Strategy seams**, not one, and conflating them is the most common mistake candidates make on this question: `SchedulingStrategy` decides how *one* elevator orders its own pending stops (the classic SCAN algorithm, §6), while `ElevatorSelectionStrategy` decides *which* elevator, among many, gets assigned a new hallway call in the first place (§7). They operate at different scopes — within one car vs. across the whole bank — and a strong answer keeps them as two distinct interfaces exactly as drawn here, never merged into one "figure out what to do" method.
 
 ---
 
-## 3. The State Pattern for Elevator Movement
+## 3. Key Classes & Interfaces — What Each One Is Responsible For
+
+| Class / Interface | Responsibility | Why It's Shaped This Way |
+|---|---|---|
+| `ElevatorController` | Owns the full bank of elevators; routes new external (hallway) requests to one of them | The only class aware of *all* elevators at once — individual `Elevator` instances never know about their siblings |
+| `Elevator` | Owns its own state, current floor, and pending-stops set; steps itself forward one unit of movement at a time | Each elevator is fully self-contained — it can be tested, reasoned about, and even simulated in isolation from the controller |
+| `ElevatorState` (interface) + 4 states | Encapsulates what "step forward" means depending on whether the car is idle, moving up, moving down, or doors open | The State pattern here replaces a tangle of boolean flags (`isMoving`, `isDoorOpen`, `direction`) that could otherwise drift into an inconsistent combination |
+| `SchedulingStrategy` (interface) | Decides the next stop for **one** elevator given its pending requests and current direction | Scoped deliberately to a single car — this is where SCAN/"elevator algorithm" logic lives (§6) |
+| `ElevatorSelectionStrategy` (interface) | Decides which elevator, among the whole bank, should service a new hallway call | Scoped deliberately to the controller — a completely different optimization problem from scheduling within one car (§7) |
+| `Request` (abstract) + `ExternalRequest`/`InternalRequest` | Represents a hallway call (floor + direction, no car assigned yet) vs. an in-car destination press (already tied to a specific elevator) | Splitting these matters because they enter the system through different paths and carry different information — an external request needs elevator *selection*, an internal one doesn't |
+
+---
+
+## 4. The State Pattern for Elevator Movement
 
 ```java
 public interface ElevatorState {
@@ -92,7 +144,7 @@ public class DoorOpenState implements ElevatorState {
 
 ---
 
-## 4. The Elevator Class and Request Queue Management
+## 5. The Elevator Class and Request Queue Management
 
 ```java
 public class Elevator {
@@ -146,7 +198,7 @@ public class Elevator {
 
 ---
 
-## 5. Component Deep Dive: The Scheduling Algorithm (SCAN / "Elevator Algorithm")
+## 6. Component Deep Dive: The Scheduling Algorithm (SCAN / "Elevator Algorithm")
 
 A naive **FIFO** (first-in-first-out) approach to request servicing — servicing requests in the literal order they arrived — is a classic wrong answer here: if requests arrive for floor 10, then floor 2, then floor 9, FIFO would send the elevator to 10, then all the way down to 2, then back up to 9 — wildly inefficient, needlessly reversing direction multiple times.
 
@@ -157,7 +209,7 @@ A naive **FIFO** (first-in-first-out) approach to request servicing — servicin
 
 ---
 
-## 6. Multi-Elevator Selection Strategy
+## 7. Multi-Elevator Selection Strategy
 
 ```java
 public interface ElevatorSelectionStrategy {
@@ -180,7 +232,7 @@ public class NearestElevatorStrategy implements ElevatorSelectionStrategy {
 
 ---
 
-## 7. The Controller (Orchestration)
+## 8. The Controller (Orchestration)
 
 ```java
 public class ElevatorController {
@@ -210,7 +262,7 @@ public class ElevatorController {
 
 ---
 
-## 8. Extensibility Walkthrough
+## 9. Extensibility Walkthrough
 
 | Follow-up | How this design absorbs it |
 |---|---|
@@ -220,7 +272,7 @@ public class ElevatorController {
 
 ---
 
-## 9. 60-Second Interview Answer
+## 10. 60-Second Interview Answer
 
 > "I'd model elevator movement as an explicit State machine — idle, moving up, moving down, door open — because each state has fundamentally different legal transitions, and encapsulating that per-state as a class, rather than a shared conditional, structurally prevents illegal transitions as the system grows. For scheduling within one elevator, I'd use the SCAN algorithm — the same one used for disk-head scheduling — where the elevator continues in its current direction servicing all pending requests along the way, only reversing once there's nothing further in that direction, which avoids the wild inefficiency of naive FIFO request ordering. I'd back that with sorted TreeSets of pending floor requests per direction, giving O(log n) lookup of the next nearest floor to service. For a multi-elevator building, I'd pick which elevator services a new request based on more than just current distance — also considering whether a candidate is already heading that way and how many stops it already has queued, the same 'don't pick by one naive metric alone' reasoning that applies to load balancer algorithm selection."
 

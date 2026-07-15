@@ -8,6 +8,23 @@
 
 **Problem it solves:** define a family of interchangeable algorithms, encapsulate each one, and make them swappable at runtime — the direct alternative to a large `if/else` or `switch` block scattered through business logic.
 
+```mermaid
+classDiagram
+    class PricingStrategy {
+        <<interface>>
+        +calculatePrice(ParkingTicket) BigDecimal
+    }
+    class HourlyPricingStrategy
+    class FlatRatePricingStrategy
+    class ParkingSpotBilling {
+        -PricingStrategy pricingStrategy
+        +generateBill(ParkingTicket) BigDecimal
+    }
+    PricingStrategy <|.. HourlyPricingStrategy
+    PricingStrategy <|.. FlatRatePricingStrategy
+    ParkingSpotBilling --> PricingStrategy : holds one, injected
+```
+
 ```java
 public interface PricingStrategy {
     BigDecimal calculatePrice(ParkingTicket ticket);
@@ -48,6 +65,29 @@ public class ParkingSpotBilling {
 ## 2. State
 
 **Problem it solves:** allow an object to alter its behavior when its internal state changes, such that it appears to change its class — replacing a sprawling `if (state == X) ... else if (state == Y) ...` conditional with polymorphism, one class per state.
+
+```mermaid
+classDiagram
+    class OrderState {
+        <<interface>>
+        +next(Order) OrderState
+        +cancel(Order) void
+    }
+    class PlacedState
+    class PreparingState
+    class OutForDeliveryState
+    class Order {
+        -OrderState currentState
+        +advance() void
+        +cancel() void
+    }
+    OrderState <|.. PlacedState
+    OrderState <|.. PreparingState
+    OrderState <|.. OutForDeliveryState
+    Order --> OrderState : delegates to current
+    PlacedState ..> PreparingState : next() returns
+    PreparingState ..> OutForDeliveryState : next() returns
+```
 
 ```java
 public interface OrderState {
@@ -96,6 +136,25 @@ public class Order {
 
 **Problem it solves:** define a one-to-many dependency so that when one object (the "subject") changes state, all its dependents ("observers") are notified automatically — the OOP-level analogue of the pub/sub messaging pattern from [Message Queues](../../../02-building-blocks/message-queues/README.md), but in-process rather than over a network.
 
+```mermaid
+classDiagram
+    class OrderObserver {
+        <<interface>>
+        +onOrderStatusChanged(Order, OrderStatus) void
+    }
+    class CustomerNotifierObserver
+    class AnalyticsObserver
+    class Order {
+        -List~OrderObserver~ observers
+        -OrderStatus status
+        +addObserver(OrderObserver) void
+        +updateStatus(OrderStatus) void
+    }
+    OrderObserver <|.. CustomerNotifierObserver
+    OrderObserver <|.. AnalyticsObserver
+    Order "1" o-- "many" OrderObserver : notifies on change
+```
+
 ```java
 public interface OrderObserver {
     void onOrderStatusChanged(Order order, OrderStatus newStatus);
@@ -136,6 +195,28 @@ public class AnalyticsObserver implements OrderObserver {
 ## 4. Command
 
 **Problem it solves:** encapsulate a request/action as an object, so it can be queued, logged, undone, or passed around like any other value — decoupling the object that *invokes* an operation from the object that actually *performs* it.
+
+```mermaid
+classDiagram
+    class Command {
+        <<interface>>
+        +execute() void
+        +undo() void
+    }
+    class MoveCommand {
+        -ChessBoard board
+        -Position from
+        -Position to
+        -Piece capturedPiece
+    }
+    class MoveHistory {
+        -Deque~Command~ history
+        +executeAndRecord(Command) void
+        +undoLast() void
+    }
+    Command <|.. MoveCommand
+    MoveHistory "1" *-- "many" Command : stack of
+```
 
 ```java
 public interface Command {

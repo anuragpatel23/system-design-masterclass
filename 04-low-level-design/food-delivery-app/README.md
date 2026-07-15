@@ -16,25 +16,87 @@
 
 ## 2. Class Design
 
+```mermaid
+classDiagram
+    class Order {
+        -OrderState state
+        -List~OrderObserver~ observers
+        -List~OrderItem~ items
+        -Restaurant restaurant
+        -Customer customer
+        -Rider rider
+        +transitionTo(OrderState) void
+        +attach(OrderObserver) void
+        +notifyObservers() void
+    }
+    class OrderState {
+        <<interface, State>>
+        +next(Order) void
+        +cancel(Order) void
+    }
+    class PlacedState
+    class AcceptedState
+    class PreparingState
+    class OutForDeliveryState
+    class DeliveredState
+    class CancelledState
+    class OrderObserver {
+        <<interface, Observer>>
+        +onOrderUpdated(Order) void
+    }
+    class CustomerAppObserver
+    class RestaurantDashboardObserver
+    class RiderAppObserver
+    class AnalyticsObserver
+    class RiderAssignmentStrategy {
+        <<interface, Strategy>>
+        +assignRider(Order, List~Rider~) Rider
+    }
+    class OrderFactory {
+        <<Factory>>
+        +createOrder(Customer, Restaurant, List~OrderItem~) Order
+    }
+    class Restaurant
+    class Customer
+    class Rider
+
+    Order "1" --> "1" OrderState : current
+    Order "1" o-- "many" OrderObserver : notifies
+    OrderState <|.. PlacedState
+    OrderState <|.. AcceptedState
+    OrderState <|.. PreparingState
+    OrderState <|.. OutForDeliveryState
+    OrderState <|.. DeliveredState
+    OrderState <|.. CancelledState
+    OrderObserver <|.. CustomerAppObserver
+    OrderObserver <|.. RestaurantDashboardObserver
+    OrderObserver <|.. RiderAppObserver
+    OrderObserver <|.. AnalyticsObserver
+    OrderFactory ..> Order : constructs
+    OrderFactory ..> RiderAssignmentStrategy : uses
+    Order --> Restaurant
+    Order --> Customer
+    Order --> Rider
 ```
-Order
- ├── has an ── OrderState (State pattern — the core lifecycle)
- ├── has many ── OrderObserver (Observer pattern — customer app, restaurant
- │                dashboard, rider app, analytics, all subscribed independently)
- └── has an ── OrderItem list
 
-RiderAssignmentStrategy (Strategy pattern — pluggable rider-matching logic,
- conceptually the same problem as Uber's driver matching, reapplied here)
-
-OrderFactory (Factory pattern — constructs an Order with the correct
- initial state and registers the standard set of observers)
-
-Restaurant, Customer, Rider — the three actor entities
-```
+**Take this diagram as the base for the whole design** — it's deliberately drawn to show all four patterns working together rather than in isolation: `OrderFactory` (Factory) constructs an `Order` already wired up with its initial `OrderState` (State) and its full set of `OrderObserver`s (Observer) subscribed, and separately consults a `RiderAssignmentStrategy` (Strategy) when a rider needs to be matched. No single pattern solves this problem alone — the diagram's four distinct relationship types (`<|..` realization, `o--` aggregation, `..>` dependency) map directly onto why each pattern was reached for.
 
 ---
 
-## 3. The Order State Machine (the centerpiece of this design)
+## 3. Key Classes & Interfaces — What Each One Is Responsible For
+
+| Class / Interface | Responsibility | Why It's Shaped This Way |
+|---|---|---|
+| `Order` | The central entity — owns current state, subscribed observers, and line items | Deliberately thin — it delegates "what happens on the next transition" to `OrderState` and "who needs to know" to its observer list, rather than hardcoding either |
+| `OrderState` (interface) + 6 states | Encapsulates valid transitions and what each transition means for this specific status | Prevents illegal transitions (e.g., `DELIVERED` → `PREPARING`) by construction — each state only exposes the transitions that are actually valid from it |
+| `OrderObserver` (interface) + 4 observers | Each independently reacts to an order update in its own way (push a customer notification, refresh a restaurant dashboard, alert a rider, log analytics) | New stakeholders (e.g., a support-ticket auto-updater) are added by writing one new observer class — `Order` never needs to change to support a new notification target |
+| `RiderAssignmentStrategy` (interface) | Matches an order to an available rider | The same matching-algorithm problem as [Uber's](../../03-high-level-design/uber/README.md) driver assignment, reapplied here — kept as a swappable interface since matching logic is exactly the kind of thing that gets tuned/A-B-tested independently of everything else |
+| `OrderFactory` | Constructs a fully-formed `Order` — correct initial state, standard observers pre-registered | Centralizes "how is a valid Order actually built" in one place, so construction logic doesn't leak into every call site that creates an order |
+| `Restaurant`, `Customer`, `Rider` | The three actor entities an `Order` references | Kept as simple reference-holding entities — none of them contain order-lifecycle logic themselves, which stays centralized in `OrderState` |
+
+---
+
+## 4. The Order State Machine (the centerpiece of this design)
 
 ```java
 public interface OrderState {
@@ -115,7 +177,7 @@ public class DeliveredState implements OrderState {
 
 ---
 
-## 4. The Observer Pattern for Multi-Party Notification
+## 5. The Observer Pattern for Multi-Party Notification
 
 Each state transition needs to notify potentially different parties (the restaurant needs to know about `PLACED → ACCEPTED`; the customer needs to know about almost every transition; the rider only cares from `PREPARING` onward). Rather than hardcoding "who to notify" inside each state class, the `Order` maintains a list of observers, and the state classes simply trigger generic notification calls:
 
@@ -178,7 +240,7 @@ public class RiderAppObserver implements OrderObserver {
 
 ---
 
-## 5. Rider Assignment via Strategy
+## 6. Rider Assignment via Strategy
 
 ```java
 public interface RiderAssignmentStrategy {
@@ -202,7 +264,7 @@ This reuses the exact geospatial-proximity reasoning from [Uber's](../../03-high
 
 ---
 
-## 6. Order Construction via Factory
+## 7. Order Construction via Factory
 
 ```java
 public class OrderFactory {
@@ -226,7 +288,7 @@ public class OrderFactory {
 
 ---
 
-## 7. Extensibility Walkthrough
+## 8. Extensibility Walkthrough
 
 | Follow-up | How this design absorbs it |
 |---|---|
@@ -237,7 +299,7 @@ public class OrderFactory {
 
 ---
 
-## 8. 60-Second Interview Answer
+## 9. 60-Second Interview Answer
 
 > "The order lifecycle is naturally a State machine — placed, accepted, preparing, rider assigned, picked up, delivered — and I'd give each state its own class so that state-specific rules, like whether cancellation is still allowed and what refund policy applies, live with that state rather than in a shared conditional that gets harder to maintain correctly as more rules are added. Since the customer, restaurant, and rider each care about different subsets of status changes, I'd use the Observer pattern — the Order and its states just announce 'status changed,' and each observer independently decides whether that particular change is relevant to it, so adding a new interested party, like an analytics tracker, never requires touching the Order or State classes. Rider assignment is a Strategy, since it's conceptually the same nearest-available-match problem as Uber's driver matching, just reapplied to riders relative to the restaurant's location instead of a rider's location. And I'd flag the same double-assignment race condition that shows up in Uber and in hotel booking — finding a candidate rider and actually claiming them needs to be atomic, or two concurrent orders could grab the same rider."
 

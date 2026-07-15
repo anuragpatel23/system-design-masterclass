@@ -15,25 +15,80 @@
 
 ## 2. Class Design — the Book vs. BookCopy Distinction
 
-```
-Book (the abstract WORK — "The Hobbit", ISBN, author, title)
- └── has many ── BookCopy (one PHYSICAL, lendable instance — copy #1, copy #2, ...)
-                    └── has a ── CopyStatus (AVAILABLE / CHECKED_OUT / RESERVED / LOST)
+```mermaid
+classDiagram
+    class Book {
+        -String isbn
+        -String title
+        -String author
+        -List~BookCopy~ copies
+        +findAvailableCopy() Optional~BookCopy~
+        +addCopy(BookCopy) void
+    }
+    class BookCopy {
+        -String copyId
+        -String isbn
+        -CopyStatus status
+        -Member currentBorrower
+        +checkOut(Member) void
+        +returnCopy() void
+    }
+    class CopyStatus {
+        <<enumeration>>
+        AVAILABLE
+        CHECKED_OUT
+        RESERVED
+        LOST
+    }
+    class Member {
+        -String memberId
+        -List~Loan~ activeLoans
+        -List~Reservation~ reservations
+    }
+    class Loan {
+        -BookCopy copy
+        -Member member
+        -Date dueDate
+    }
+    class Reservation {
+        -Book book
+        -Member member
+        -Date placedAt
+    }
+    class Library {
+        -Map~String, Book~ catalog
+        -Map~String, Queue~Reservation~~ holdsQueue
+    }
 
-Member
- ├── has many ── Loan (an active checkout of a specific BookCopy)
- └── has many ── Reservation (a hold placed on a Book, not a specific copy)
-
-Library
- ├── catalog: Map<ISBN, Book>
- └── holds queue: Map<ISBN, Queue<Reservation>> (FIFO per title)
+    Book "1" *-- "many" BookCopy : has copies of
+    BookCopy --> CopyStatus : has status
+    Member "1" --> "many" Loan : has active
+    Member "1" --> "many" Reservation : has placed
+    Loan --> BookCopy : checks out
+    Reservation --> Book : holds on title, NOT a specific copy
+    Library "1" *-- "many" Book : catalogs
 ```
+
+**Take this diagram as the base for the whole design** — the single most load-bearing relationship in it is `Reservation --> Book`, deliberately pointing at `Book` and never at `BookCopy`. That one arrow is the entire "Book vs. BookCopy" insight made visual: a member reserving a title doesn't care which physical copy they eventually get, so the reservation is modeled against the catalog-level work, while a `Loan` — an actual, physical checkout — correctly points at a specific `BookCopy` instead.
 
 **Why this distinction is the single most important modeling decision in this whole exercise:** if you model "Book" as a single entity with a `status` field, you cannot represent a library owning 3 copies where 2 are checked out and 1 is available — you'd need some awkward workaround (a count field with no way to track *which specific copy* a given member has, breaking due-date tracking per copy). Separating **Book** (the catalog-level work, one row per ISBN) from **BookCopy** (one row per physical, individually-trackable, individually-loanable item) is exactly analogous to separating a product's catalog listing from its individual inventory units in an e-commerce system — a pattern that recurs constantly in real systems once you're looking for it.
 
 ---
 
-## 3. Core Classes
+## 3. Key Classes & Interfaces — What Each One Is Responsible For
+
+| Class | Responsibility | Why It's Shaped This Way |
+|---|---|---|
+| `Book` | Represents the catalog-level work (one row per ISBN); owns the list of its physical `BookCopy` instances | Deliberately holds no status of its own — availability is a property of individual copies, not the title, so `Book` only ever aggregates and queries them |
+| `BookCopy` | Represents one physical, individually-trackable item; owns its own `CopyStatus` and current borrower | Every state transition (`checkOut`/`returnCopy`) lives here, not on `Book` or `Library` — the object that owns the state is the object that mutates it |
+| `Member` | Tracks a person's active `Loan`s and placed `Reservation`s | Kept as the natural owner of "what does this person currently have," which is exactly what a librarian needs to look up at the desk |
+| `Loan` | Records one active checkout — which copy, which member, when it's due | Points at `BookCopy` specifically, since a loan is inherently about one physical item, not the abstract title |
+| `Reservation` | Records a hold on a title, not a specific copy | Points at `Book`, not `BookCopy` — this is the crux of the whole design (see above) |
+| `Library` | Top-level catalog owner; maps ISBN → `Book` and ISBN → per-title holds queue | The one class that knows about every title system-wide; individual checkout/return logic is still delegated down to `BookCopy`, not reimplemented here |
+
+---
+
+## 4. Core Classes
 
 ```java
 public class Book {
@@ -87,7 +142,7 @@ public enum CopyStatus { AVAILABLE, CHECKED_OUT, RESERVED, LOST }
 
 ---
 
-## 4. Component Deep Dive: The Reservation/Holds Queue
+## 5. Component Deep Dive: The Reservation/Holds Queue
 
 A hold is placed on the **Book (title)**, not on any specific `BookCopy` — the member doesn't care *which* physical copy they get, only that a copy of that title becomes available. When any copy of that title is returned, the **longest-waiting reservation** for that title should be offered the copy first (a fairness/FIFO requirement).
 
@@ -160,7 +215,7 @@ public class LibraryService {
 
 ---
 
-## 5. Data Model (for a persisted, real deployment)
+## 6. Data Model (for a persisted, real deployment)
 
 ```sql
 CREATE TABLE books (
@@ -197,7 +252,7 @@ CREATE TABLE reservations (
 
 ---
 
-## 6. Extensibility Walkthrough
+## 7. Extensibility Walkthrough
 
 | Follow-up | How this design absorbs it |
 |---|---|
@@ -207,7 +262,7 @@ CREATE TABLE reservations (
 
 ---
 
-## 7. 60-Second Interview Answer
+## 8. 60-Second Interview Answer
 
 > "The key modeling decision is separating Book, the catalog-level title, from BookCopy, an individual physical item — a library can own several copies of the same title, some checked out and some available, and collapsing that into one entity makes it impossible to track which specific copy a given member has, or to support per-copy due dates. A hold is placed against the Book, not a specific copy, since the member doesn't care which physical copy they get. The detail I'd make sure to get right is that returning a copy has to check the reservation queue for that title first, offering it to the longest-waiting member before it's ever exposed as generally available — otherwise a walk-in member could take a copy out from under someone who's been waiting, which silently breaks the fairness the holds feature exists to guarantee."
 

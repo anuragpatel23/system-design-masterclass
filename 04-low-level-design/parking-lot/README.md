@@ -16,28 +16,85 @@
 
 ## 2. Class Design
 
-```
-ParkingLot
- ├── has many ── Floor
- │                 └── has many ── ParkingSpot (abstract, subtyped by size)
- │                                    ├── MotorcycleSpot
- │                                    ├── CompactSpot
- │                                    └── LargeSpot
- ├── uses ── SpotAssignmentStrategy (interface — Strategy pattern)
- ├── uses ── PricingStrategy (interface — Strategy pattern)
- └── issues ── ParkingTicket
+```mermaid
+classDiagram
+    class ParkingLot {
+        -List~Floor~ floors
+        -SpotAssignmentStrategy assignmentStrategy
+        -PricingStrategy pricingStrategy
+        +parkVehicle(Vehicle) ParkingTicket
+        +processExit(ParkingTicket) Receipt
+    }
+    class Floor {
+        -int floorNumber
+        -List~ParkingSpot~ spots
+    }
+    class ParkingSpot {
+        <<abstract>>
+        -String spotId
+        -boolean isOccupied
+        +isAvailable() boolean
+    }
+    class MotorcycleSpot
+    class CompactSpot
+    class LargeSpot
+    class Vehicle {
+        <<abstract>>
+        -String licensePlate
+        -VehicleSize size
+    }
+    class Motorcycle
+    class Car
+    class Bus
+    class SpotAssignmentStrategy {
+        <<interface>>
+        +findSpot(Vehicle, List~Floor~) ParkingSpot
+    }
+    class PricingStrategy {
+        <<interface>>
+        +calculateFee(ParkingTicket) Money
+    }
+    class ParkingTicket {
+        -String ticketId
+        -Vehicle vehicle
+        -ParkingSpot spot
+        -DateTime entryTime
+    }
 
-Vehicle (abstract)
- ├── Motorcycle
- ├── Car
- └── Bus
+    ParkingLot "1" *-- "many" Floor : contains
+    Floor "1" *-- "many" ParkingSpot : contains
+    ParkingSpot <|-- MotorcycleSpot
+    ParkingSpot <|-- CompactSpot
+    ParkingSpot <|-- LargeSpot
+    Vehicle <|-- Motorcycle
+    Vehicle <|-- Car
+    Vehicle <|-- Bus
+    ParkingLot ..> SpotAssignmentStrategy : uses
+    ParkingLot ..> PricingStrategy : uses
+    ParkingLot ..> ParkingTicket : issues
 ```
+
+**Take this diagram as the base for the whole design** — the two dashed arrows (`ParkingLot ..> SpotAssignmentStrategy`, `ParkingLot ..> PricingStrategy`) are the entire point of the exercise: they mark the two seams where behavior is injected rather than hardcoded, which is exactly what lets "now make pricing different for weekends" be answered by writing one new class, not by touching `ParkingLot` at all. The solid diamond (`*--`) relationships are composition — a `Floor` cannot outlive its `ParkingLot`, and a `ParkingSpot` cannot outlive its `Floor`, which matters because it tells you object lifecycle, not just structure: deleting a floor should cascade to its spots.
 
 **Why `ParkingSpot` is abstract with size-specific subtypes, rather than one class with a `size` enum field:** this is a deliberate, defensible design choice worth stating out loud — if spot-type-specific *behavior* ever diverges (e.g., a `LargeSpot` needing different occupancy-check logic for a bus that might span multiple physical spot markings), subtyping gives you a clean seam for that; a single class with an enum field is perfectly fine too if no such behavioral divergence is expected, and it's fine to say so explicitly and justify picking the simpler option if you'd rather not over-engineer — **the interview signal is being able to argue either choice, not memorizing one as "correct."**
 
 ---
 
-## 3. Core Interfaces (the extensibility seams)
+## 3. Key Classes & Interfaces — What Each One Is Responsible For
+
+| Class / Interface | Responsibility | Why It's Shaped This Way |
+|---|---|---|
+| `ParkingLot` | Top-level orchestrator — owns floors, holds references to the two pluggable strategies, exposes `parkVehicle`/`processExit` as the only public entry points | Everything else in the diagram is reachable only through this class — callers never talk to a `Floor` or `ParkingSpot` directly, which keeps the internal structure free to change |
+| `Floor` | Owns a bounded set of `ParkingSpot`s | Kept deliberately dumb — it has no assignment or pricing logic of its own, so a change to how spots are chosen never requires touching this class |
+| `ParkingSpot` (abstract) + subtypes | Tracks occupancy state for one physical spot, sized for a specific vehicle category | Abstract base lets `MotorcycleSpot`/`CompactSpot`/`LargeSpot` diverge in behavior later without changing the type callers program against |
+| `Vehicle` (abstract) + subtypes | Represents the thing being parked, carrying the size category that drives spot matching | Mirrors the `ParkingSpot` hierarchy deliberately — matching a vehicle to a spot becomes a size comparison, not a chain of `instanceof` checks |
+| `SpotAssignmentStrategy` (interface) | Decides which specific spot a given vehicle gets | The Strategy pattern seam for "prioritize handicapped spots," "fill closest-to-entrance first," etc. — swappable without touching `ParkingLot` |
+| `PricingStrategy` (interface) | Computes the fee for a completed `ParkingTicket` | The second, independent Strategy seam — pricing and assignment are orthogonal concerns and deliberately never share a class |
+| `ParkingTicket` | Immutable record of one parking session — vehicle, assigned spot, entry time | Passed to `PricingStrategy.calculateFee()` at exit; carries everything pricing needs without pricing logic needing to query back into `ParkingLot` |
+
+---
+
+## 4. Core Interfaces (the extensibility seams)
 
 ```java
 public enum VehicleSize { MOTORCYCLE, COMPACT, LARGE }
@@ -174,7 +231,7 @@ public class FlatRatePricingStrategy implements PricingStrategy {
 
 ---
 
-## 4. The Orchestrating Class
+## 5. The Orchestrating Class
 
 ```java
 public class ParkingLot {
@@ -215,7 +272,7 @@ public class ParkingLot {
 
 ---
 
-## 5. Extensibility Walkthrough (what an interviewer will actually probe)
+## 6. Extensibility Walkthrough (what an interviewer will actually probe)
 
 | Mid-interview follow-up | How this design absorbs it |
 |---|---|
@@ -226,7 +283,7 @@ public class ParkingLot {
 
 ---
 
-## 6. 60-Second Interview Answer
+## 7. 60-Second Interview Answer
 
 > "I'd model the physical hierarchy directly — a ParkingLot containing Floors containing ParkingSpots, with spot subtypes per vehicle size. The two places I'd expect requirements to change are how a spot gets assigned and how the fee gets calculated, so I'd make both pluggable via the Strategy pattern — a SpotAssignmentStrategy and a PricingStrategy interface, injected into the ParkingLot rather than hardcoded, so adding a new pricing scheme or a new assignment priority rule never touches the core class. I'd also flag a real concurrency concern: with multiple entry gates, finding an available spot and claiming it are two separate steps, which is a genuine race condition if not made atomic — the same class of bug as overbooking in a distributed booking system, just at object level here."
 

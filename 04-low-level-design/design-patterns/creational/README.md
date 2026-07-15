@@ -10,6 +10,17 @@
 
 **When to actually use it:** genuinely global, stateless-or-carefully-synchronized resources where multiple instances would be wasteful or incorrect (a thread pool, a cache manager). **When to avoid it:** as a lazy substitute for proper dependency injection — Singletons make unit testing harder (global mutable state is difficult to mock/reset between tests) and hide a class's real dependencies. In a Spring Boot context, **`@Component`/`@Service` beans are already effectively singletons by default**, managed by the container — reaching for a manual Singleton pattern in a Spring application is usually a sign you should just use the framework's own DI-managed singleton scope instead.
 
+```mermaid
+classDiagram
+    class ConnectionPoolManager {
+        -static volatile ConnectionPoolManager instance
+        -List~Connection~ pool
+        -ConnectionPoolManager()
+        +static getInstance() ConnectionPoolManager
+    }
+    note for ConnectionPoolManager "Private constructor + static\naccessor is the whole pattern"
+```
+
 ```java
 public class ConnectionPoolManager {
     // volatile ensures visibility of the fully-constructed instance across threads
@@ -42,6 +53,23 @@ public class ConnectionPoolManager {
 ## 2. Factory Method
 
 **Problem it solves:** delegate the decision of *which concrete class to instantiate* to subclasses (or a dedicated factory), so calling code depends only on an abstract type, never a concrete one.
+
+```mermaid
+classDiagram
+    class NotificationSender {
+        <<interface>>
+        +send(String, String) void
+    }
+    class EmailSender
+    class SmsSender
+    class NotificationSenderFactory {
+        <<Factory>>
+        +static create(String channel) NotificationSender
+    }
+    NotificationSender <|.. EmailSender
+    NotificationSender <|.. SmsSender
+    NotificationSenderFactory ..> NotificationSender : creates
+```
 
 ```java
 public interface NotificationSender {
@@ -77,6 +105,27 @@ public class NotificationSenderFactory {
 
 **Problem it solves:** create **families of related objects** together, ensuring the objects within a family are always compatible with each other (e.g., a UI toolkit that must produce a matching Button + Checkbox + ScrollBar for either "Windows style" or "Mac style" — never a mismatched mix).
 
+```mermaid
+classDiagram
+    class UIComponentFactory {
+        <<interface>>
+        +createButton() Button
+        +createCheckbox() Checkbox
+    }
+    class MacUIFactory
+    class WindowsUIFactory
+    class MacButton
+    class MacCheckbox
+    class WindowsButton
+    class WindowsCheckbox
+    UIComponentFactory <|.. MacUIFactory
+    UIComponentFactory <|.. WindowsUIFactory
+    MacUIFactory ..> MacButton : creates
+    MacUIFactory ..> MacCheckbox : creates
+    WindowsUIFactory ..> WindowsButton : creates
+    WindowsUIFactory ..> WindowsCheckbox : creates
+```
+
 ```java
 public interface UIComponentFactory {
     Button createButton();
@@ -107,6 +156,28 @@ Checkbox checkbox = factory.createCheckbox();
 ## 4. Builder
 
 **Problem it solves:** construct a complex object with many optional parameters step by step, avoiding a constructor with an unwieldy number of parameters (a "telescoping constructor" anti-pattern) and avoiding invalid intermediate states.
+
+```mermaid
+classDiagram
+    class HttpRequest {
+        -String url
+        -String method
+        -Map~String,String~ headers
+        -String body
+    }
+    class Builder {
+        -String url
+        -String method
+        -Map~String,String~ headers
+        -String body
+        +method(String) Builder
+        +header(String, String) Builder
+        +body(String) Builder
+        +build() HttpRequest
+    }
+    HttpRequest +-- Builder : static nested class
+    Builder ..> HttpRequest : constructs, validated
+```
 
 ```java
 public class HttpRequest {
@@ -161,6 +232,21 @@ HttpRequest request = new HttpRequest.Builder("https://api.example.com/orders")
 ## 5. Prototype
 
 **Problem it solves:** create new objects by **cloning an existing, pre-configured instance**, rather than constructing from scratch — useful when object construction is expensive (e.g., involves a database read or complex computation) and you need many similar-but-slightly-varied copies.
+
+```mermaid
+classDiagram
+    class Cloneable {
+        <<interface>>
+    }
+    class GameCharacterTemplate {
+        -String characterClass
+        -int baseHealth
+        -List~String~ defaultInventory
+        +clone() GameCharacterTemplate
+    }
+    Cloneable <|.. GameCharacterTemplate
+    GameCharacterTemplate ..> GameCharacterTemplate : clone() returns\na new, deep-copied instance
+```
 
 ```java
 public class GameCharacterTemplate implements Cloneable {

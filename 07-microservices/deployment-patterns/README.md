@@ -12,6 +12,34 @@ Every pattern below is a different answer to the same two questions: **(1) what 
 
 Replace instances gradually: take 1 (or a batch) out of the [load balancer](../../02-building-blocks/load-balancers/README.md), upgrade, health-check, return, repeat. This is Kubernetes' default (`maxUnavailable`/`maxSurge`).
 
+```mermaid
+graph LR
+    subgraph T0["T0: 100% v1"]
+        A0["v1"] --- B0["v1"] --- C0["v1"] --- D0["v1"]
+    end
+    subgraph T1["T1: 25% v2"]
+        A1["v2"] --- B1["v1"] --- C1["v1"] --- D1["v1"]
+    end
+    subgraph T2["T2: 75% v2"]
+        A2["v2"] --- B2["v2"] --- C2["v2"] --- D2["v1"]
+    end
+    subgraph T3["T3: 100% v2"]
+        A3["v2"] --- B3["v2"] --- C3["v2"] --- D3["v2"]
+    end
+    T0 --> T1 --> T2 --> T3
+
+    style A1 fill:#c9f7d1,stroke:#333
+    style A2 fill:#c9f7d1,stroke:#333
+    style B2 fill:#c9f7d1,stroke:#333
+    style C2 fill:#c9f7d1,stroke:#333
+    style A3 fill:#c9f7d1,stroke:#333
+    style B3 fill:#c9f7d1,stroke:#333
+    style C3 fill:#c9f7d1,stroke:#333
+    style D3 fill:#c9f7d1,stroke:#333
+```
+
+**Take this as the reference for why "two versions coexist" is the defining risk:** at T1 and T2, v1 and v2 instances sit **behind the same load balancer simultaneously**, both serving live traffic and both hitting the same shared database — this is exactly why §6's schema-compatibility discipline isn't optional.
+
 - **Pros:** no extra fleet cost; no downtime; built into every orchestrator.
 - **Cons:** **two versions run simultaneously** for the whole rollout — so every schema and API change must be backward-compatible (see §6, the part interviewers actually probe); rollback means rolling forward-in-reverse (minutes, not seconds); and a bad version reaches a growing share of *all* traffic indiscriminately while metrics catch up.
 - **The connection-draining detail:** instances must be removed from [service-discovery](../service-discovery/README.md) rotation and allowed to finish in-flight requests *before* termination, or every deploy causes a blip of 502s.
@@ -20,6 +48,25 @@ Replace instances gradually: take 1 (or a batch) out of the [load balancer](../.
 
 Run two identical environments: **blue** (live, v1) and **green** (idle, v2). Deploy to green, run smoke tests against it in production conditions, then flip the router so 100% of traffic moves to green. Blue stays warm as the rollback target.
 
+```mermaid
+graph LR
+    Client([Client Traffic])
+    Router{Router}
+    Blue["BLUE fleet (v1)<br/>live"]
+    Green["GREEN fleet (v2)<br/>idle, smoke-tested"]
+
+    Client --> Router
+    Router == 100% ==> Blue
+    Router -. 0% .-> Green
+
+    style Blue fill:#a8d5ff,stroke:#333
+    style Green fill:#c9f7d1,stroke:#333
+```
+
+**After the flip:** the router sends 100% to Green and 0% to Blue — Blue keeps running, warm, as the rollback target.
+
+**Take this as the reference for why rollback is fast here specifically:** unlike rolling deployment's "roll forward in reverse," blue-green's rollback is the **same router flip in the opposite direction** — Blue never stopped running, so reverting is instant, not a redeploy.
+
 - **Pros:** rollback is a router flip — **seconds**; the new version is fully tested in a production-identical environment before any user sees it; no mixed-version window for *traffic* (though the DB is still shared — schema compatibility is still required).
 - **Cons:** **2x infrastructure cost** during the window; the cutover is all-or-nothing — if v2 has a bug that only manifests at full production load or with real traffic diversity, 100% of users find it simultaneously; stateful concerns (in-flight sessions, in-progress jobs) need draining across the flip.
 
@@ -27,7 +74,27 @@ Run two identical environments: **blue** (live, v1) and **green** (idle, v2). De
 
 Ship v2 to a tiny slice first — 1% of traffic (or one region/cell) — and **compare its key metrics against v1's** (error rate, p99 latency, business KPIs). Healthy ⇒ step up: 1% → 5% → 25% → 100%. Unhealthy ⇒ route the 1% back — blast radius was 1%.
 
-- **Automated canary analysis** is the staff-level phrase: pipelines (e.g., Spinnaker+Kayenta lineage) compare canary vs baseline statistically and promote or roll back *without a human staring at dashboards*. Best practice runs a **baseline pair**: a fresh v1 instance alongside the canary v2, so you compare two identically-warm instances rather than canary-vs-long-warmed-fleet.
+```mermaid
+graph LR
+    Client([Client Traffic])
+    Router{"Weighted<br/>Router"}
+    V1["v1 fleet<br/>(baseline)"]
+    V2["v2 canary"]
+    Analysis{"Automated<br/>canary analysis:<br/>error rate, p99,<br/>business KPIs"}
+
+    Client --> Router
+    Router -->|"99% → 95% → 75% → 0%"| V1
+    Router -->|"1% → 5% → 25% → 100%"| V2
+    V2 -.->|metrics| Analysis
+    V1 -.->|"metrics (baseline pair)"| Analysis
+    Analysis -->|healthy: step up| Router
+    Analysis -->|"unhealthy: route back to 0%"| Router
+
+    style V2 fill:#f9d976,stroke:#333
+    style Analysis fill:#c9f7d1,stroke:#333
+```
+
+**Automated canary analysis** is the staff-level phrase: pipelines (e.g., Spinnaker+Kayenta lineage) compare canary vs baseline statistically and promote or roll back *without a human staring at dashboards*. Best practice runs a **baseline pair**: a fresh v1 instance alongside the canary v2, so you compare two identically-warm instances rather than canary-vs-long-warmed-fleet.
 - **Pros:** bounded blast radius; validates against *real* traffic (which no staging environment reproduces); rollback trivial at low percentages.
 - **Cons:** needs solid [observability](../../10-security-observability/observability/README.md) to judge health — a canary without metrics is theater; slow burns (memory leak over hours) escape short canary windows; mixed versions run for the longest of all patterns, so compatibility discipline is maximal; and sticky-session/user-consistency questions (a user bouncing between v1 and v2 mid-session) need handling.
 
@@ -41,6 +108,30 @@ A **feature flag** wraps new behavior in a runtime conditional evaluated per-req
 ## 6. The part interviewers actually probe: database migrations under zero-downtime deploys
 
 Every pattern above has old and new code running against **one database** at some point — so schema changes must be **backward-compatible across one version step**, achieved with the **expand–migrate–contract** pattern:
+
+```mermaid
+graph LR
+    subgraph Expand["1. EXPAND"]
+        E1["Add new column/table<br/>(additive, nullable/defaulted --<br/>harmless to old code)"]
+        E2["Deploy code that WRITES both<br/>old and new forms,<br/>still READS old"]
+        E1 --> E2
+    end
+    subgraph Migrate["2. MIGRATE"]
+        M1["Backfill historical rows<br/>in the background"]
+        M2["Switch reads to the new form<br/>(often behind a flag)"]
+        M1 --> M2
+    end
+    subgraph Contract["3. CONTRACT"]
+        C1["Stop dual-writing once no<br/>code path reads the old form"]
+        C2["Drop the old column<br/>in a LATER release"]
+        C1 --> C2
+    end
+    Expand --> Migrate --> Contract
+
+    style Expand fill:#c9f7d1,stroke:#333
+    style Migrate fill:#f9d976,stroke:#333
+    style Contract fill:#ffb3b3,stroke:#333
+```
 
 1. **Expand:** add the new column/table (additive, nullable/defaulted — harmless to old code). Deploy code that **writes both** old and new forms but still reads old.
 2. **Migrate:** backfill historical rows in the background; switch reads to the new form (often behind a flag).

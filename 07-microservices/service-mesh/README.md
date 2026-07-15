@@ -10,20 +10,31 @@ Every pattern in [Resilience Patterns](../resilience-patterns/README.md), plus [
 
 ## 2. The sidecar pattern (the data plane)
 
-```
- Pod / Host A                            Pod / Host B
-┌─────────────────────────┐            ┌─────────────────────────┐
-│  Service A              │            │  Service B              │
-│  (business logic only)  │            │                         │
-│        │ localhost      │            │        ▲ localhost      │
-│        ▼                │   mTLS,    │        │                │
-│  Sidecar proxy (Envoy) ─┼────────────┼─► Sidecar proxy (Envoy) │
-│  retries, timeouts,     │  metrics,  │  authn/z, telemetry     │
-│  CB, LB, routing        │  tracing   │                         │
-└─────────────────────────┘            └─────────────────────────┘
-             ▲ config pushed to every sidecar ▲
-             └───────── CONTROL PLANE ────────┘
-                    (e.g., Istio's istiod)
+```mermaid
+graph TD
+    subgraph ControlPlane["CONTROL PLANE (e.g., Istio's istiod)"]
+        CP["compiles policy,<br/>pushes config to every sidecar"]
+    end
+
+    subgraph PodA["Pod / Host A"]
+        SvcA["Service A<br/>(business logic only)"]
+        SidecarA["Sidecar proxy (Envoy)<br/>retries, timeouts, CB, LB, routing"]
+        SvcA -->|"localhost"| SidecarA
+    end
+
+    subgraph PodB["Pod / Host B"]
+        SidecarB["Sidecar proxy (Envoy)<br/>authn/z, telemetry"]
+        SvcB["Service B"]
+        SidecarB -->|"localhost"| SvcB
+    end
+
+    SidecarA -->|"mTLS, metrics, tracing"| SidecarB
+    CP -.->|config| SidecarA
+    CP -.->|config| SidecarB
+
+    style ControlPlane fill:#fff3cd,stroke:#333
+    style SidecarA fill:#a8d5ff,stroke:#333
+    style SidecarB fill:#a8d5ff,stroke:#333
 ```
 
 - A **sidecar proxy** (almost always **Envoy**) is deployed next to every service instance; traffic in and out is transparently routed through it. The service talks plain HTTP to `localhost`; the sidecar does discovery-aware load balancing, retries with budgets, timeouts, circuit breaking, **mTLS** encryption + workload identity, and emits uniform metrics/traces — identically for a Go, Java, or Python service, with **zero application code**.
@@ -40,6 +51,27 @@ Every pattern in [Resilience Patterns](../resilience-patterns/README.md), plus [
 - **Debugging indirection:** "is it the app or the sidecar?" becomes a standing question in incident reviews.
 
 **When it's worth it:** many services × multiple languages × security/compliance requirements (mTLS everywhere) — the per-service library tax exceeds the mesh's platform tax. **When it isn't:** a handful of services in one language — a shared library or the [API gateway](../../02-building-blocks/api-gateway/README.md) covers you. And note the boundary: the **gateway handles north-south traffic** (client → system, one front door); the **mesh handles east-west** (service ↔ service, everywhere) — a favorite disambiguation question.
+
+```mermaid
+graph TD
+    Client([External Client])
+    GW["API Gateway<br/>NORTH-SOUTH: client → system,<br/>one front door"]
+
+    subgraph Mesh["Service Mesh -- EAST-WEST: service ↔ service, everywhere"]
+        S1[Order Service]
+        S2[Inventory Service]
+        S3[Payment Service]
+        S4[Notification Service]
+        S1 <-->|sidecar-to-sidecar| S2
+        S1 <-->|sidecar-to-sidecar| S3
+        S3 <-->|sidecar-to-sidecar| S4
+    end
+
+    Client --> GW --> S1
+
+    style GW fill:#f9d976,stroke:#333
+    style Mesh fill:#fff3cd,stroke:#333
+```
 
 ## 4. Real-world reference
 

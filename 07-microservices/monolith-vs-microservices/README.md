@@ -10,6 +10,38 @@
 - **Microservices:** the system is decomposed into services that are (1) **independently deployable**, (2) **independently scalable**, (3) **owning their own data** (no shared database), and (4) communicating only over network APIs or async events. If your "microservices" share a database or must be deployed together, you have a **distributed monolith** — all of the costs, none of the benefits, and interviewers love hearing you name this failure mode.
 - **Modular monolith:** the increasingly recommended middle ground — one deployable, but with module boundaries enforced strictly enough (separate schemas, no cross-module imports outside published interfaces) that later extraction into services is a mechanical exercise rather than an archaeology project.
 
+```mermaid
+graph TB
+    subgraph Mono["MONOLITH"]
+        direction TB
+        M["Single Process<br/>Orders + Inventory + Payments modules"]
+        MDB[(Shared Database)]
+        M --> MDB
+    end
+
+    subgraph Micro["MICROSERVICES"]
+        direction TB
+        S1["Orders Service"]
+        S2["Inventory Service"]
+        S3["Payments Service"]
+        DB1[(Orders DB)]
+        DB2[(Inventory DB)]
+        DB3[(Payments DB)]
+        S1 -->|network call| S2
+        S1 -->|network call| S3
+        S1 --> DB1
+        S2 --> DB2
+        S3 --> DB3
+    end
+
+    style MDB fill:#a8d5ff,stroke:#333
+    style DB1 fill:#a8d5ff,stroke:#333
+    style DB2 fill:#a8d5ff,stroke:#333
+    style DB3 fill:#a8d5ff,stroke:#333
+```
+
+**Take this as the reference for the "distributed monolith" trap named above:** the defining line isn't the number of processes, it's whether each service **owns its own database**. Three processes all pointed at one shared `MDB` is a distributed monolith — network-call latency and partial-failure risk of microservices, with none of the independent-deployability benefit, since a schema change still requires coordinating every service that touches that shared database.
+
 ---
 
 ## 2. What microservices actually buy you
@@ -46,6 +78,30 @@ Every in-process function call that becomes a network call inherits **all** of t
 | Domain boundaries still unclear | **Wait.** The most expensive microservices mistake is drawing service boundaries wrong — a wrong in-process module boundary is a refactor; a wrong service boundary is a data migration plus API deprecation across teams |
 
 **The migration answer (frequently asked as "how would you split an existing monolith?"):** the **strangler-fig pattern** — put a routing layer ([API gateway](../../02-building-blocks/api-gateway/README.md)) in front of the monolith, extract one capability at a time behind it (starting with the least entangled, highest-value one), route its traffic to the new service, repeat. Never big-bang rewrite. Data is split by first giving the module a private schema *inside* the shared DB, then moving that schema out — decoupling logically before physically.
+
+```mermaid
+graph LR
+    subgraph Stage1["Stage 1: Start"]
+        C1([Client]) --> GW1[Gateway] --> Mono1["Monolith<br/>(Orders, Inventory, Payments)"]
+    end
+    subgraph Stage2["Stage 2: Extract one capability"]
+        C2([Client]) --> GW2[Gateway]
+        GW2 -->|"/payments/*"| Pay["Payments Service<br/>(extracted)"]
+        GW2 -->|"everything else"| Mono2["Monolith<br/>(Orders, Inventory)"]
+    end
+    subgraph Stage3["Stage 3: Repeat until monolith is 'strangled'"]
+        C3([Client]) --> GW3[Gateway]
+        GW3 --> Ord["Orders Service"]
+        GW3 --> Inv["Inventory Service"]
+        GW3 --> Pay3["Payments Service"]
+    end
+    Stage1 --> Stage2 --> Stage3
+
+    style Pay fill:#c9f7d1,stroke:#333
+    style Ord fill:#c9f7d1,stroke:#333
+    style Inv fill:#c9f7d1,stroke:#333
+    style Pay3 fill:#c9f7d1,stroke:#333
+```
 
 ---
 

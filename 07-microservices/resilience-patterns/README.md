@@ -8,6 +8,25 @@
 
 The killer is not a *down* dependency — it's a **slow** one. Suppose service A calls B, and B's latency jumps from 20ms to 30s (GC storm, hot shard, whatever):
 
+```mermaid
+sequenceDiagram
+    participant Caller as A's Callers
+    participant A as Service A<br/>(200-thread pool)
+    participant B as Service B<br/>(degraded, 30s latency)
+
+    A->>B: request 1
+    A->>B: request 2
+    A->>B: request 3...
+    Note over A: threads blocked waiting on B,<br/>pool fills toward 200/200
+    Note over A: A can no longer serve ANY<br/>request -- even ones that<br/>don't touch B at all
+    Caller->>A: unrelated request
+    A--xCaller: no threads available -- A appears "slow" too
+    Note over Caller: A's callers now see the<br/>same symptom -- failure<br/>propagates UP the call graph
+    Caller->>A: retry!
+    A->>B: retry!
+    Note over B: "retry storm" -- retries pile<br/>MORE traffic onto the already-<br/>struggling B, guaranteeing<br/>it never recovers
+```
+
 1. A's threads/connections block waiting on B. A has a finite pool (say 200 threads).
 2. At even modest traffic, all 200 threads are soon parked waiting on B. A is now unable to serve *anything* — including endpoints that don't touch B at all.
 3. A's callers now see A as slow. Their pools fill. The failure **propagates up the call graph**, and retries multiply the traffic onto the already-struggling B ("retry storm"), guaranteeing it never recovers.
@@ -33,17 +52,26 @@ Every pattern below attacks a specific step of that chain. The senior framing: *
 
 A circuit breaker wraps calls to a dependency and tracks the recent failure rate:
 
-```
-        failure rate over window > threshold (e.g. >50% of last 20 calls)
-CLOSED ────────────────────────────────────────────────────────► OPEN
-(calls flow;                                             (calls fail IMMEDIATELY,
- failures counted)                                        no network attempt at all)
-    ▲                                                            │
-    │  probe succeeds                                            │ after cooldown (e.g. 30s)
-    │                                                            ▼
-    └───────────────────────── HALF-OPEN ◄───────────────────────┘
-                    (let a few probe requests through;
-                     success ⇒ CLOSED, failure ⇒ OPEN again)
+```mermaid
+stateDiagram-v2
+    [*] --> CLOSED
+    CLOSED --> OPEN : failure rate over window<br/>exceeds threshold<br/>(e.g. >50% of last 20 calls)
+    OPEN --> HALF_OPEN : after cooldown (e.g. 30s)
+    HALF_OPEN --> CLOSED : probe requests succeed
+    HALF_OPEN --> OPEN : probe requests fail
+
+    note right of CLOSED
+        Calls flow normally;
+        failures counted
+    end note
+    note right of OPEN
+        Calls fail IMMEDIATELY,
+        no network attempt at all
+    end note
+    note right of HALF_OPEN
+        Let a few probe requests
+        through to test recovery
+    end note
 ```
 
 - **What it buys, precisely:** while OPEN, callers get an instant failure instead of burning a thread for a full timeout — protecting the *caller's* pools (step 2 of the cascade) — and the dependency gets breathing room to recover instead of being hammered (the retry-storm fix). The half-open state is the recovery probe: cautiously test, don't flood.
@@ -62,6 +90,23 @@ Named after ship compartments: **partition resources so one dependency's failure
 ---
 
 ## 7. How they layer (the composed answer)
+
+```mermaid
+graph LR
+    Req([Incoming Request]) --> Shed{"Load shedding<br/>at the edge?<br/>node overloaded"}
+    Shed -->|healthy| Timeout["Deadline-propagated<br/>timeout"]
+    Shed -->|"reject early (429/503)"| Reject([Fast rejection])
+    Timeout --> Retry["Bounded retries,<br/>jittered backoff<br/>(idempotent + transient only)"]
+    Retry --> Breaker{"Circuit breaker:<br/>CLOSED or OPEN?"}
+    Breaker -->|CLOSED| Bulkhead["Bulkhead-limited<br/>dependency pool"]
+    Breaker -->|OPEN| Fallback([Fallback:<br/>cached/default data])
+    Bulkhead --> Dep[("Dependency B")]
+    Dep -.->|fails| Fallback
+
+    style Shed fill:#f9d976,stroke:#333
+    style Breaker fill:#ffb3b3,stroke:#333
+    style Fallback fill:#c9f7d1,stroke:#333
+```
 
 Per call: **deadline-propagated timeout** → bounded **retries with jittered backoff** (idempotent + transient only, budget-capped) → **circuit breaker** around the dependency → **bulkhead-limited** pool → **fallback** on open circuit → **shed load** at the edge when the whole node is stressed. Defense in depth: each layer catches what the previous one lets through.
 

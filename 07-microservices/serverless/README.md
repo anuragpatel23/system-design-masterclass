@@ -19,6 +19,24 @@
 
 **What it costs:**
 - **Cold starts:** an invocation with no warm environment must provision one — copy code, boot runtime, run init. Penalty ranges from ~50–100ms (Go, Node, tuned) to seconds (JVM with heavy frameworks, VPC-attached functions historically). It hits **p99, not average** — exactly the [tail-latency](../../01-foundations/latency-vs-throughput/README.md) metric that matters — and it's why latency-critical synchronous paths are the weakest fit. Mitigations: provisioned concurrency (pre-warmed pool — note you're now paying for idle again, partially refuting the model), lighter runtimes, SnapStart-style snapshotting.
+
+```mermaid
+graph LR
+    subgraph Cold["COLD START"]
+        direction LR
+        R1([Request]) --> P1["Provision environment<br/>(download code, boot runtime)"] --> I1["Run init code"] --> H1["Handle request"]
+    end
+    subgraph Warm["WARM START"]
+        direction LR
+        R2([Request]) --> H2["Handle request<br/>(environment already alive)"]
+    end
+
+    style P1 fill:#ffb3b3,stroke:#333
+    style I1 fill:#ffb3b3,stroke:#333
+    style H2 fill:#c9f7d1,stroke:#333
+```
+
+**Take this as the reference for why cold starts hit p99 specifically, not the average:** most invocations in a steady traffic stream land on an already-warm environment (the fast, green path) — it's only the invocations that happen to need a *new* environment (traffic spikes, scale-to-zero after idle, a new deployment) that pay the provisioning tax, which is exactly why the damage shows up concentrated in the tail percentiles rather than spread evenly across every request.
 - **Execution limits:** capped duration (e.g., 15 min on Lambda), memory, and payload sizes — long-running jobs must be re-architected (step functions, queues) or don't fit.
 - **Statelessness is mandatory:** any state must live in external stores; in-memory caches and long-lived connections don't survive between invocations. The classic trap: **each concurrent Lambda opens its own database connections**, so a burst of 5,000 concurrent functions can exhaust a relational database's connection pool instantly — the standard fixes are a connection proxy (RDS Proxy) or a serverless-native store (DynamoDB).
 - **Vendor lock-in** — not so much the function code as the *event-source wiring* (IAM, EventBridge, DynamoDB streams) around it; **harder local testing/debugging**; and **per-invocation observability** needs [distributed tracing](../../10-security-observability/observability/README.md) because every hop is a network boundary.
@@ -38,6 +56,24 @@
 ## 4. Real-world reference
 
 **S3 → Lambda thumbnail/media processing** is the textbook win: perfectly bursty, embarrassingly parallel, stateless, seconds-long — you'd otherwise run an idle fleet sized for peak upload hours. At the other pole, companies with steady enormous request volumes keep the hot path on provisioned fleets for exactly the utilization-economics reason above. Knowing *both* poles — and the RDS-connection-exhaustion trap in between — is the depth signal.
+
+```mermaid
+graph LR
+    User([User uploads photo])
+    S3[("S3 Bucket<br/>original image")]
+    Lambda["Lambda Function<br/>generate thumbnail<br/>0 → thousands, scale-to-zero"]
+    S3Out[("S3 Bucket<br/>thumbnail")]
+    DDB[("DynamoDB<br/>metadata, on-demand")]
+
+    User -->|upload| S3
+    S3 -->|"trigger event"| Lambda
+    Lambda -->|write| S3Out
+    Lambda -->|write| DDB
+
+    style Lambda fill:#f9d976,stroke:#333
+```
+
+**Take this as the reference architecture for the "serverless" pattern as a whole:** every component in this diagram is itself pay-per-use and scale-to-zero — S3 storage, Lambda invocations, and DynamoDB on-demand capacity — which is precisely the "broader umbrella" property named in §1, not just the function-as-a-service piece in isolation.
 
 ## 5. Common pitfalls
 

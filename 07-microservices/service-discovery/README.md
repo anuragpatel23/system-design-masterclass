@@ -26,14 +26,22 @@ The registry has three jobs, and each is a failure mode in disguise:
 
 ## 3. Discovery: client-side vs server-side
 
-```
-CLIENT-SIDE DISCOVERY                      SERVER-SIDE DISCOVERY
-                                           
-Service A ──query──► Registry             Service A ──► Load Balancer / VIP ──► Service B
-    │                   │                                     │
-    │◄──[B1, B2, B3]────┘                              Registry consulted
-    │                                                  by the LB, not by A
-    └──pick one (LB logic in client)──► B2
+```mermaid
+graph TD
+    subgraph ClientSide["CLIENT-SIDE DISCOVERY"]
+        A1[Service A] -->|"1. query"| Reg1[(Registry)]
+        Reg1 -.->|"2. [B1, B2, B3]"| A1
+        A1 -->|"3. picks one --<br/>LB logic in client"| B2a[Instance B2]
+    end
+
+    subgraph ServerSide["SERVER-SIDE DISCOVERY"]
+        A2[Service A] -->|request| LB[Load Balancer / VIP]
+        LB -->|"registry consulted<br/>by the LB, not by A"| Reg2[(Registry)]
+        LB --> B2b[Instance B2]
+    end
+
+    style Reg1 fill:#f9d976,stroke:#333
+    style Reg2 fill:#f9d976,stroke:#333
 ```
 
 - **Client-side discovery** (Netflix Eureka + Ribbon lineage): the caller fetches the healthy-instance list and load-balances *in-process* (round-robin, least-loaded, zone-aware). **Pros:** no extra network hop, per-request routing intelligence (e.g., prefer same-zone instances to cut cross-AZ cost/latency), no LB to scale. **Cons:** discovery/LB logic embedded in every service, in every language — a polyglot org pays it N times, and upgrading the logic means redeploying the fleet.

@@ -22,11 +22,53 @@ Perfect isolation (as if every transaction ran one at a time, with no overlap at
 ### Dirty Read
 Transaction A reads a value that Transaction B has written but **not yet committed** — if B then rolls back, A has read a value that, from B's perspective, never actually happened.
 
+```mermaid
+sequenceDiagram
+    participant A as Transaction A
+    participant DB as Database Row (balance)
+    participant B as Transaction B
+
+    B->>DB: UPDATE balance = 1000 (uncommitted)
+    A->>DB: READ balance
+    DB-->>A: 1000 (dirty -- not yet committed!)
+    B->>DB: ROLLBACK
+    Note over A: A acted on a value that,<br/>from B's perspective, never happened
+```
+
 ### Non-Repeatable Read
 Transaction A reads a row, Transaction B updates and commits a change to that same row, and A reads the row **again within the same transaction**, getting a **different** value than its first read — the same query, run twice in the same transaction, produced two different answers.
 
+```mermaid
+sequenceDiagram
+    participant A as Transaction A
+    participant DB as Database Row (balance)
+    participant B as Transaction B
+
+    A->>DB: READ balance
+    DB-->>A: 1000
+    B->>DB: UPDATE balance = 1500
+    B->>DB: COMMIT
+    A->>DB: READ balance (again, same transaction)
+    DB-->>A: 1500
+    Note over A: same query, same transaction,<br/>two different answers
+```
+
 ### Phantom Read
 Transaction A runs a query matching a set of rows (e.g., `WHERE status = 'PENDING'`), Transaction B inserts a **new** row that would match that same query and commits, and A re-runs the same query within its own transaction, seeing a **different set of rows** (a "phantom" row appeared) than its first run.
+
+```mermaid
+sequenceDiagram
+    participant A as Transaction A
+    participant DB as orders table
+    participant B as Transaction B
+
+    A->>DB: SELECT * WHERE status='PENDING'
+    DB-->>A: 3 rows
+    B->>DB: INSERT new order, status='PENDING'
+    B->>DB: COMMIT
+    A->>DB: SELECT * WHERE status='PENDING' (again)
+    DB-->>A: 4 rows -- a "phantom" appeared
+```
 
 ### The Four Isolation Levels, Mapped to Which Anomalies They Prevent
 
@@ -57,7 +99,29 @@ Transaction A runs a query matching a set of rows (e.g., `WHERE status = 'PENDIN
 
 ## 5. Serializable Isolation — the Strongest Guarantee, and Its Real Cost
 
-Serializable isolation guarantees the result of running transactions concurrently is **equivalent to some serial (one-at-a-time) execution order** — the strongest possible guarantee, preventing all three named anomalies plus more subtle ones (like write skew, a scenario where two transactions each read overlapping data, each makes a decision based on what they read, and both commit — producing a combined result that violates an invariant neither transaction violated individually, a classic example being two doctors each independently checking "is at least one other doctor on call" and both going off-call simultaneously because each saw the other as still on call at the time they checked).
+Serializable isolation guarantees the result of running transactions concurrently is **equivalent to some serial (one-at-a-time) execution order** — the strongest possible guarantee, preventing all three named anomalies plus more subtle ones (like write skew, illustrated below).
+
+```mermaid
+sequenceDiagram
+    participant Dr1 as Dr. A's Transaction
+    participant DB as on_call table
+    participant Dr2 as Dr. B's Transaction
+
+    Note over DB: Dr. A and Dr. B both currently on_call = true
+    Dr1->>DB: SELECT COUNT(*) WHERE on_call=true
+    DB-->>Dr1: 2 (both on call)
+    Dr2->>DB: SELECT COUNT(*) WHERE on_call=true
+    DB-->>Dr2: 2 (both on call)
+    Note over Dr1: "at least one other is on call,<br/>safe for me to go off-call"
+    Note over Dr2: "at least one other is on call,<br/>safe for me to go off-call"
+    Dr1->>DB: UPDATE on_call=false WHERE doctor='A'
+    Dr1->>DB: COMMIT
+    Dr2->>DB: UPDATE on_call=false WHERE doctor='B'
+    Dr2->>DB: COMMIT
+    Note over DB: BOTH now off-call --<br/>an invariant NEITHER transaction<br/>individually violated, yet the combined<br/>result does
+```
+
+**Take this as the reference for why write skew is subtle:** neither transaction did anything wrong by its own local logic — each correctly observed "someone else is on call" and correctly acted on that observation. The anomaly only exists at the level of their **combined** effect, which is exactly why simple row-level locking doesn't catch it (neither transaction wrote to a row the other read) and why detecting this class of anomaly requires the more sophisticated conflict detection Serializable Snapshot Isolation performs.
 
 **The real cost:** achieving this typically requires either heavyweight locking (serializing genuinely concurrent transactions, hurting throughput) or, in modern MVCC-based implementations, **Serializable Snapshot Isolation (SSI)** — an optimistic approach that lets transactions proceed concurrently but **detects, at commit time, whether their combined effect could have produced a non-serializable result**, and **aborts one of the conflicting transactions**, forcing the application to retry it. **This means Serializable isolation introduces a real, new failure mode your application code must handle: transaction aborts due to serialization conflicts, which must be caught and retried** — a genuinely important, often-overlooked operational detail when adopting Serializable isolation in a real system.
 

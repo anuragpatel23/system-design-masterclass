@@ -20,46 +20,33 @@ Before reaching for any scaling technique, identify **which specific resource is
 
 ## 2. The Decision Tree
 
-```
-                         Database is struggling under load
-                                       │
-                    ┌──────────────────┴───────────────────┐
-                    │ Diagnosed as a QUERY/SCHEMA problem     │ Diagnosed as a genuine
-                    │ (missing index, bad query plan,         │ CAPACITY problem
-                    │ inefficient schema)                     │ (the hardware/topology
-                    ▼                                          │ itself is insufficient)
-        Fix the query/add the right index                     ▼
-        (see Indexing Strategies) --                Is this READ load or WRITE load?
-        cheapest, lowest-risk, do this FIRST                    │
-        and re-measure before going further        ┌───────────┴────────────┐
-                                                     ▼                        ▼
-                                              READ-bound                WRITE-bound
-                                                     │                        │
-                                     ┌───────────────┴──────┐        ┌────────┴─────────┐
-                                     ▼                       ▼        ▼                  ▼
-                              Add CACHING            Add READ        Is a single      Consider an
-                              (see Caching) --        REPLICAS        writer's        LSM-Tree-based
-                              cheapest read fix,      (see            CAPACITY the     storage engine
-                              if access pattern       Replication)    limit, or is     if the write
-                              has hot/repeated                        the WRITE        pattern is
-                              keys                                    VOLUME itself    append-heavy
-                                                                       too high for     (see B-Trees
-                                                                       ANY single       vs LSM-Trees)
-                                                                       node?                  │
-                                                                            │                  │
-                                                              ┌─────────────┴──────┐           │
-                                                              ▼                    ▼           │
-                                                     VERTICAL SCALE        SHARD the           │
-                                                     the primary            database             │
-                                                     (bigger box) --        (see Sharding) --    │
-                                                     simpler, but has       hardest, most        │
-                                                     a ceiling and a        consequential         │
-                                                     single-node cost       lever; only after     │
-                                                     curve                  vertical scaling      │
-                                                                            of the writer is      │
-                                                                            genuinely exhausted   │
-                                                                                                    │
-                                                              ◀─────────────────────────────────────┘
+```mermaid
+graph TD
+    Start{"Database struggling<br/>under load"}
+    Diag{"Diagnosed as..."}
+    QueryFix["Fix the query / add the right index<br/>(Indexing Strategies) --<br/>cheapest, lowest-risk, do FIRST,<br/>re-measure before going further"]
+    ReadWrite{"Read-bound or<br/>write-bound?"}
+    Cache["Add CACHING --<br/>cheapest read fix if access<br/>pattern has hot/repeated keys"]
+    Replicas["Add READ REPLICAS<br/>(Database Replication)"]
+    Capacity{"Single writer's CAPACITY<br/>the limit, or is WRITE VOLUME<br/>itself too high for ANY node?"}
+    Vertical["VERTICAL SCALE the primary<br/>(bigger box) -- simpler,<br/>but has a ceiling"]
+    Shard["SHARD the database<br/>(Sharding) -- hardest, most<br/>consequential lever; only after<br/>vertical scaling is exhausted"]
+    LSM["Consider an LSM-Tree-based<br/>storage engine if the write<br/>pattern is append-heavy<br/>(B-Trees vs LSM-Trees)"]
+
+    Start --> Diag
+    Diag -->|"QUERY/SCHEMA problem<br/>(missing index, bad plan)"| QueryFix
+    Diag -->|"genuine CAPACITY problem<br/>(hardware/topology insufficient)"| ReadWrite
+    ReadWrite -->|READ-bound| Cache
+    ReadWrite -->|READ-bound| Replicas
+    ReadWrite -->|WRITE-bound| Capacity
+    ReadWrite -->|WRITE-bound| LSM
+    Capacity -->|"single writer capacity"| Vertical
+    Capacity -->|"write volume too high<br/>for any single node"| Shard
+    Vertical -.->|"ceiling reached"| Shard
+
+    style QueryFix fill:#c9f7d1,stroke:#333
+    style Cache fill:#c9f7d1,stroke:#333
+    style Shard fill:#ffb3b3,stroke:#333
 ```
 
 ---

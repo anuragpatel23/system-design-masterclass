@@ -6,6 +6,38 @@
 
 ## 1. B-Trees: the Classical, Read-Optimized Structure
 
+```mermaid
+graph TD
+    Root["Root: [50 | 100]"]
+    N1["[10 | 25]"]
+    N2["[60 | 80]"]
+    N3["[120 | 150]"]
+    L1["Leaf: 1–24"]
+    L2["Leaf: 25–49"]
+    L3["Leaf: 50–59"]
+    L4["Leaf: 60–79"]
+    L5["Leaf: 80–99"]
+    L6["Leaf: 100–119"]
+    L7["Leaf: 120–149"]
+    L8["Leaf: 150+"]
+
+    Root --> N1
+    Root --> N2
+    Root --> N3
+    N1 --> L1
+    N1 --> L2
+    N2 --> L3
+    N2 --> L4
+    N2 --> L5
+    N3 --> L6
+    N3 --> L7
+    N3 --> L8
+
+    style Root fill:#f9d976,stroke:#333
+```
+
+**Take this as the reference structure** — notice it's deliberately **shallow and wide**, not deep and narrow: each node holds multiple keys and multiple children (not just 2, as in a binary tree), which is precisely what keeps real B-Trees at 3-4 levels deep even across millions of rows. A lookup for key `72` is a single root-to-leaf walk: `72 > 50` → go right into `[60|80]`'s subtree, `60 ≤ 72 < 80` → land in the `60–79` leaf — three node reads total, each one a single disk page fetch.
+
 A **B-Tree** (and its common variant, the **B+Tree**, which nearly every real relational database actually uses) is a self-balancing tree structure where each node holds multiple sorted keys and pointers to children, keeping the tree shallow (typically 3-4 levels deep even for millions of rows) so that any lookup requires very few disk reads.
 
 - **Reads:** a lookup traverses from the root down to a leaf, following the appropriate pointer at each level based on key comparisons — `O(log n)` disk seeks, and because each node is sized to match a disk page (commonly 4KB or 8KB), a single node read is a single disk I/O operation, making this structure very well matched to how disks (and their read granularity) actually work.
@@ -22,17 +54,27 @@ A **Log-Structured Merge-Tree (LSM-Tree)** takes a fundamentally different appro
 3. Once the memtable reaches a size threshold, it's **flushed to disk as an immutable, sorted file** (commonly called an "SSTable" — Sorted String Table). This flush is also a large, sequential write.
 4. Over time, many SSTables accumulate on disk. A background process called **compaction** periodically merges multiple SSTables together, discarding overwritten/deleted values and producing new, consolidated SSTables — reclaiming space and keeping the number of files a read needs to check manageable.
 
-```
-Write path (LSM-Tree):
-  Write ──▶ Memtable (in-memory, fast) ──▶ [also appended to WAL on disk, sequential]
-                     │
-              (memtable fills up)
-                     ▼
-              Flushed to disk as an immutable SSTable (sequential write)
-                     │
-              (many SSTables accumulate over time)
-                     ▼
-              Background COMPACTION merges/cleans them up periodically
+```mermaid
+graph TD
+    Write([Write x=5])
+    Memtable["Memtable<br/>in-memory sorted structure"]
+    WAL[("Write-Ahead Log<br/>sequential append, disk")]
+    SST1["SSTable 1<br/>immutable, sorted"]
+    SST2["SSTable 2<br/>immutable, sorted"]
+    SST3["SSTable 3<br/>immutable, sorted"]
+    Compacted["Compacted SSTable<br/>merged, deduplicated"]
+
+    Write --> Memtable
+    Write -.->|"also, sequential append"| WAL
+    Memtable -->|"memtable fills up → flush"| SST1
+    SST1 -.-> SST2 -.-> SST3
+    SST1 -->|background COMPACTION| Compacted
+    SST2 --> Compacted
+    SST3 --> Compacted
+
+    style Memtable fill:#a8d5ff,stroke:#333
+    style WAL fill:#c9f7d1,stroke:#333
+    style Compacted fill:#f9d976,stroke:#333
 ```
 
 **Why this makes writes so much faster:** the expensive, random-I/O-pattern work (finding and modifying the "correct" on-disk location for a given key) is **eliminated from the write path entirely** — writes are always sequential appends (to the WAL) plus fast in-memory updates (to the memtable). The cost of eventually organizing that data into an efficiently-readable, sorted, deduplicated form is **deferred to the background compaction process**, decoupled from the latency of any individual write.
@@ -42,6 +84,31 @@ Write path (LSM-Tree):
 ## 3. The Trade-off LSM-Trees Make: Read Amplification and Compaction Overhead
 
 Nothing is free — LSM-Trees pay for their write advantage in two specific, nameable costs:
+
+```mermaid
+graph LR
+    Read([Read key=X])
+    Memtable["Memtable<br/>check first"]
+    BF1{"Bloom filter:<br/>SSTable 1"}
+    BF2{"Bloom filter:<br/>SSTable 2"}
+    BF3{"Bloom filter:<br/>SSTable 3"}
+    SST1[("SSTable 1")]
+    SST3[("SSTable 3")]
+
+    Read --> Memtable
+    Memtable -->|not found| BF1
+    BF1 -->|"definitely NOT present<br/>→ skip disk read entirely"| BF2
+    BF1 -.->|"maybe present"| SST1
+    BF2 -->|"maybe present"| BF3
+    BF3 -->|"maybe present"| SST3
+
+    style Memtable fill:#a8d5ff,stroke:#333
+    style BF1 fill:#c9f7d1,stroke:#333
+    style BF2 fill:#c9f7d1,stroke:#333
+    style BF3 fill:#c9f7d1,stroke:#333
+```
+
+**Take this as the reference for why Bloom filters matter:** without them, a read for a key not present in SSTable 1 would still require an actual disk read of SSTable 1 to find that out — the Bloom filter answers "definitely absent" from an in-memory probabilistic structure, letting the read skip straight past SSTables it provably can't be in, and only pay the real disk-read cost for SSTables where the key **might** actually be present.
 
 - **Read amplification:** because a given key might exist in the memtable, or in any of several on-disk SSTables (an older value in one, possibly overwritten by a newer value in a more recent one), a read may need to **check multiple locations** to find the current value, unlike a B-Tree's single, direct root-to-leaf traversal. This is mitigated (not eliminated) by **Bloom filters** — a compact, probabilistic data structure that can quickly tell you "this SSTable definitely does NOT contain this key" (with zero false negatives, though a small rate of false positives is possible), letting a read skip SSTables that provably can't have the key, without needing to actually read them from disk.
 - **Compaction overhead:** the background compaction process itself consumes real CPU and I/O — an LSM-Tree-based database under heavy sustained write load needs to budget resources for compaction keeping pace with the incoming write rate, or SSTables accumulate faster than they're merged, degrading read performance (more and more files to check) and eventually write performance too (a well-known operational failure mode called **"compaction falling behind,"** which experienced Cassandra/RocksDB operators specifically monitor for).

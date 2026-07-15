@@ -25,6 +25,25 @@ An index spanning multiple columns together (e.g., `INDEX (last_name, first_name
 
 **The critical rule (the single most commonly-missed detail on this whole topic):** a composite index on `(A, B)` can efficiently serve queries filtering on `A` alone, or on `A AND B` together — but **cannot** efficiently serve a query filtering on `B` alone, because the index is sorted first by `A`, then by `B` *within* each `A` value — without knowing `A`, the database has no way to narrow down where to look for a given `B` value using this index at all (it would need a full scan of the index, defeating the purpose). This is sometimes called the **"leftmost prefix rule."**
 
+```mermaid
+graph TD
+    Root["Composite Index (last_name, first_name)<br/>sorted by last_name FIRST, then first_name WITHIN each"]
+    A["Adams, Carol"]
+    A2["Adams, John"]
+    S["Smith, Alice"]
+    S2["Smith, John"]
+    S3["Smith, Zoe"]
+    W["Wu, Ben"]
+
+    Root --> A --> A2
+    Root --> S --> S2 --> S3
+    Root --> W
+
+    style Root fill:#f9d976,stroke:#333
+```
+
+**Take this as the reference for why the leftmost-prefix rule is a structural fact, not a query-planner limitation:** `WHERE last_name = 'Smith'` can jump straight to the `Smith` group — the index is sorted by `last_name` first, so all `Smith` rows are physically adjacent. But `WHERE first_name = 'John'` has **no such shortcut**: matching `John`s (`Adams, John` and `Smith, John`) are scattered across entirely different, non-adjacent parts of the tree, because the index was never sorted by `first_name` at the top level — the database would have to walk the *entire* index to find them, which is exactly a full scan, just of the index instead of the table.
+
 ```sql
 CREATE INDEX idx_lastname_firstname ON employees (last_name, first_name);
 
@@ -52,6 +71,21 @@ CREATE INDEX idx_covering ON employees (last_name, first_name);
 ```
 
 **Why this matters for performance beyond a normal index:** a normal (non-covering) index lookup still requires a second step — following the index entry's pointer back to the actual table row to retrieve any columns not present in the index itself (this second step is sometimes called a "bookmark lookup" or "heap fetch," and for many matching rows, it can itself be a source of significant, easy-to-overlook random I/O, per the [B-Trees vs LSM-Trees](../b-trees-lsm-trees/README.md#1-b-trees-the-classical-read-optimized-structure) random-I/O cost discussion). A covering index eliminates that second step entirely for queries it fully covers — a genuinely valuable, if narrower-scoped, optimization worth naming when asked how to optimize a specific, known, frequently-run query.
+
+```mermaid
+graph LR
+    subgraph Normal["Normal Index Lookup — 2 hops"]
+        Q1([Query]) --> I1["Index: last_name"]
+        I1 -->|"pointer to row"| T1[("Table: full row<br/>random I/O heap fetch")]
+    end
+    subgraph Covering["Covering Index — 1 hop"]
+        Q2([Query]) --> I2["Index: last_name, first_name<br/>ALL needed columns present"]
+        I2 -.->|"never touches the table"| Done([Answer returned<br/>directly from index])
+    end
+
+    style T1 fill:#ffb3b3,stroke:#333
+    style I2 fill:#c9f7d1,stroke:#333
+```
 
 ---
 

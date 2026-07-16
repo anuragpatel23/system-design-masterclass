@@ -6,6 +6,40 @@
 
 ## 1. The three jobs Nginx does in almost every stack
 
+```mermaid
+graph TD
+    Master["Master Process<br/>reads config, manages workers"]
+    W1["Worker 1<br/>single-threaded event loop<br/>epoll/kqueue"]
+    W2["Worker 2<br/>single-threaded event loop"]
+    W3["Worker N (= CPU cores)<br/>single-threaded event loop"]
+
+    Master --> W1
+    Master --> W2
+    Master --> W3
+
+    C1(["~10k connections"]) -.->|multiplexed, non-blocking| W1
+    C2(["~10k connections"]) -.->|multiplexed, non-blocking| W2
+
+    style Master fill:#f9d976,stroke:#333
+```
+
+**Take this as the reference for why one small VM fronts thousands of app servers:** each worker is **one thread** handling tens of thousands of connections simultaneously via non-blocking I/O — an idle connection costs a socket file descriptor, not a thread's memory stack, which is the fundamental capacity difference from a thread-per-connection model like classic Apache or [Tomcat](../../12-app-servers/tomcat/README.md).
+
+```mermaid
+sequenceDiagram
+    participant Client as Slow Mobile Client
+    participant Nginx
+    participant App as App Server (Tomcat thread)
+
+    App->>Nginx: full response, instantly
+    Note over Nginx: buffers the ENTIRE response
+    Nginx-->>App: thread freed in milliseconds
+    Note over App: thread returns to pool,<br/>free to serve another request
+    Nginx--)Client: trickles bytes out over<br/>seconds, at the client's slow pace
+```
+
+**Take this as the reference for the "slow-client absorption" claim:** the app server's expensive, limited thread is occupied only for the milliseconds it takes to hand its response to Nginx — Nginx, not the app server, absorbs the seconds-long cost of actually delivering those bytes to a slow connection. This single behavior is what multiplies effective app-server capacity without adding a single app-server instance.
+
 - **Reverse proxy:** terminates client connections (and TLS), forwards to app servers (`proxy_pass`). What you gain: TLS offload, slow-client absorption (Nginx buffers the slow mobile client's bytes; your [Tomcat](../../12-app-servers/tomcat/README.md) thread is freed in milliseconds instead of being held for seconds — this alone multiplies app-server capacity), compression, connection reuse upstream, and a uniform place for headers (`X-Forwarded-For`, `X-Request-ID` for [tracing](../../10-security-observability/observability/README.md)).
 - **Load balancer:** `upstream` blocks with round-robin (default), `least_conn`, `ip_hash` (session affinity), weights, plus passive health checks (`max_fails`/`fail_timeout`) — the [L7 load balancer](../../02-building-blocks/load-balancers/README.md) concept in config form.
 - **Static file server + cache:** serves files with `sendfile` (zero-copy — the same syscall [Kafka](../kafka/README.md) uses), and `proxy_cache` turns it into a mini-[CDN](../../02-building-blocks/cdn/README.md) edge.

@@ -13,7 +13,37 @@
 - **Probes** — liveness ("restart me"), readiness ("route to me"), startup. The [liveness-vs-readiness distinction](../../07-microservices/service-discovery/README.md) prevents the restart-the-warming-service outage.
 - **Requests/limits + HPA** — requests drive *scheduling* (bin-packing), limits drive *cgroup enforcement*; the HorizontalPodAutoscaler scales replicas on CPU/custom metrics ([observability](../../10-security-observability/observability/README.md) feeding control).
 - **StatefulSet / PVC** — stable identities + persistent volumes for the stateful minority (databases); **DaemonSet** (one per node — log shippers); **Job/CronJob** (batch).
-- **Architecture:** control plane = **API server** (front door, everything is a REST object), **etcd** (the cluster's [Raft](../../05-distributed-systems/consensus-algorithms/raft/README.md)-backed CP store — Kubernetes state *is* an etcd database), **scheduler** (pod→node placement), **controller-manager** (the reconciliation loops); per node = **kubelet** (runs pods) + **kube-proxy** (Service routing).
+- ```mermaid
+graph TD
+    User([kubectl apply])
+    API["API Server<br/>front door, everything is a REST object"]
+    Etcd[("etcd<br/>Raft-backed CP store --<br/>cluster state IS an etcd database")]
+    Scheduler["Scheduler<br/>pod → node placement"]
+    CM["Controller Manager<br/>the reconciliation loops"]
+
+    subgraph Node["Worker Node"]
+        Kubelet["kubelet<br/>runs pods"]
+        KubeProxy["kube-proxy<br/>Service routing"]
+        Pod1["Pod"]
+        Pod2["Pod"]
+        Kubelet --> Pod1
+        Kubelet --> Pod2
+    end
+
+    User -->|"declare desired state"| API
+    API --> Etcd
+    Scheduler -->|watches for unscheduled pods| API
+    CM -->|"compares desired vs actual,<br/>acts to converge"| API
+    API -->|assign pod to node| Kubelet
+    Kubelet -.->|"report actual state"| API
+
+    style Etcd fill:#a8d5ff,stroke:#333
+    style CM fill:#f9d976,stroke:#333
+```
+
+**Take this as the reference for the "reconciliation machine" mental model stated above:** `kubectl apply` only ever writes **desired state** into etcd via the API server — it's the **Controller Manager's** loop, running continuously and independently, that notices the gap between desired and actual and does the actual work (creating pods, replacing crashed ones, orchestrating a rollout). Every "feature" in §1 is this same loop, just watching a different object type.
+
+**Architecture:** control plane = **API server** (front door, everything is a REST object), **etcd** (the cluster's [Raft](../../05-distributed-systems/consensus-algorithms/raft/README.md)-backed CP store — Kubernetes state *is* an etcd database), **scheduler** (pod→node placement), **controller-manager** (the reconciliation loops); per node = **kubelet** (runs pods) + **kube-proxy** (Service routing).
 
 ## 2. The YAML that covers the interview
 

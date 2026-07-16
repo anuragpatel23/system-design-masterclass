@@ -15,6 +15,28 @@
 
 ## 2. The recipes (derive them from the primitives)
 
+```mermaid
+graph TD
+    Election["/election/"]
+    N40["candidate-0000000040<br/>(Client C)"]
+    N41["candidate-0000000041<br/>(Client A) -- LEADER, lowest seq"]
+    N42["candidate-0000000042<br/>(Client B)"]
+    N43["candidate-0000000043<br/>(Client D)"]
+
+    Election --> N40
+    Election --> N41
+    Election --> N42
+    Election --> N43
+
+    N42 -.->|"watches ONLY its predecessor"| N41
+    N43 -.->|"watches ONLY its predecessor"| N42
+    N40 -.->|"lowest -- IS the leader,<br/>watches nothing"| N40
+
+    style N41 fill:#c9f7d1,stroke:#333
+```
+
+**Take this as the reference for why watching the predecessor, not the leader, is the correct recipe:** if every waiting client watched the leader node directly, the leader's death would fire a notification to **all of them simultaneously** — a "herd" all racing to become the new leader, most doing wasted work. By having each node watch only the one **immediately before it** in sequence, a death triggers exactly **one** notification, to exactly the node that's actually next in line — the others aren't disturbed at all, since their own predecessor hasn't changed.
+
 - **Leader election:** everyone creates an **ephemeral sequential** node under `/election/`; lowest sequence = leader. Everyone else watches **only the node just before theirs** — when the leader dies, its ephemeral node vanishes, and *only the next-in-line* is notified. Watching the predecessor (not the leader) avoids the **herd effect** — the detail that separates a real answer from a recitation.
 - **Distributed lock:** identical recipe under `/locks/` — lowest sequence holds the lock; release = delete (or session death ⇒ **no orphaned locks**, the advantage over [Redis SETNX locks](../redis/README.md); the trade: ZK's lower write throughput and operational weight).
 - **Service registry:** register = create ephemeral node with your address; crash = automatic deregistration; consumers watch the parent dir ([service discovery](../../07-microservices/service-discovery/README.md), CP flavor).

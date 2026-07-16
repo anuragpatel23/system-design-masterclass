@@ -8,17 +8,29 @@
 
 Producers never publish to queues — they publish to an **exchange** with a **routing key**; **bindings** decide which queue(s) get a copy:
 
+```mermaid
+graph TD
+    Producer(["Producer<br/>routing key: order.eu.paid"])
+    Exchange{{"EXCHANGE<br/>(topic type)"}}
+    Q1["queue: billing<br/>binding: order.*.paid"]
+    Q2["queue: eu-analytics<br/>binding: order.eu.#"]
+    Q3["queue: audit<br/>binding: # (everything)"]
+    W1["Worker"]
+    W2["Worker"]
+    W3["Worker"]
+
+    Producer --> Exchange
+    Exchange -->|"matches order.*.paid"| Q1
+    Exchange -->|"matches order.eu.#"| Q2
+    Exchange -->|"matches #"| Q3
+    Q1 -->|"round-robin,<br/>ONE consumer per message"| W1
+    Q2 --> W2
+    Q3 --> W3
+
+    style Exchange fill:#f9d976,stroke:#333
 ```
-Producer ──(routing key: "order.eu.paid")──► EXCHANGE
-                                              │  bindings
-             ┌────────────────────────────────┼────────────────────┐
-             ▼                                ▼                    ▼
-        queue: billing              queue: eu-analytics       queue: audit
-        (topic: order.*.paid)       (topic: order.eu.#)       (fanout: everything)
-             │ each queue: one message consumed by ONE worker, round-robin
-             ▼
-        workers (prefetch-limited, per-message ack)
-```
+
+**Take this as the reference for "smart broker, dumb consumer":** the producer publishes **once**, with no knowledge of who receives it — the exchange's bindings, configured entirely in the broker, decide that this one message fans out to all three queues (matching three different wildcard patterns), and each queue independently round-robins its copy to exactly one of its own workers. Compare this to Kafka's model ([Kafka §1](../kafka/README.md#1-architecture-in-the-order-interviews-probe-it)), where routing logic lives in the *consumer's* choice of topic/partition to read, not in broker-side configuration.
 
 - **Exchange types:** `direct` (exact key match), `topic` (wildcards: `order.*.paid`, `order.eu.#`), `fanout` (broadcast to all bound queues), `headers` (match on headers). Routing logic lives *in the broker's config*, not in consumers — the opposite of Kafka's "everyone reads the log and filters."
 - **Acknowledgement & redelivery:** consumer acks each message after processing (`ack`); a crash before ack ⇒ broker **requeues and redelivers** (at-least-once ⇒ [idempotent consumers](../../08-api-design/idempotency/README.md) again). `nack`/`reject` with `requeue=false` routes to a **dead-letter exchange (DLX)** — the [DLQ pattern](../../02-building-blocks/message-queues/README.md) as a first-class feature. Poison-message handling = retry count in headers + DLX after N attempts.

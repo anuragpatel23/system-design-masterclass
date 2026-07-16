@@ -10,7 +10,33 @@
 - **Expiry:** TTL per key (`SET k v EX 60`). Expired keys are removed **lazily** (on access) + **actively** (periodic sampling) — so memory isn't reclaimed the instant a key expires.
 - **Eviction (when `maxmemory` is hit):** `noeviction` (errors on writes — default!), `allkeys-lru`, `volatile-lru` (LRU among TTL'd keys only), `allkeys-lfu`, `volatile-ttl`, random variants. **Redis LRU is approximate** — it samples N keys (default 5) and evicts the best candidate, trading exactness for zero bookkeeping overhead. For caching, `allkeys-lfu` or `allkeys-lru` is what you want; running a cache with `noeviction` is a classic misconfiguration.
 - **Persistence:** **RDB** (point-in-time snapshots via fork — compact, fast restart, loses everything since last snapshot) vs **AOF** (append-only command log, `fsync` configurable: `everysec` = at most 1s of loss — bigger, slower restart, safer). Production caches often disable both; Redis-as-datastore uses AOF `everysec` + periodic RDB. Know that **fork-based RDB on a big instance causes latency spikes** (copy-on-write memory pressure).
-- **Replication & HA:** async primary→replica replication (so failover can lose acknowledged writes — [replication lag](../../02-building-blocks/databases/replication/README.md)); **Sentinel** for monitoring + automatic failover; **Redis Cluster** for sharding — 16384 **hash slots** divided among primaries, client-side routing via `MOVED` redirects, multi-key ops only when keys share a slot (hash tags `{user:1}:a`, `{user:1}:b`). This is [consistent-hashing-style sharding](../../02-building-blocks/databases/sharding/README.md) made concrete.
+- ```mermaid
+graph TD
+    Client["Client"]
+    Client -->|"GET user:42:name<br/>hash slot = CRC16(key) % 16384"| Primary1
+
+    subgraph Cluster["Redis Cluster — 16384 hash slots"]
+        Primary1["Primary A<br/>slots 0-5460"]
+        Primary2["Primary B<br/>slots 5461-10922"]
+        Primary3["Primary C<br/>slots 10923-16383"]
+        Replica1["Replica of A"]
+        Replica2["Replica of B"]
+        Replica3["Replica of C"]
+        Primary1 -.->|async replication| Replica1
+        Primary2 -.->|async replication| Replica2
+        Primary3 -.->|async replication| Replica3
+    end
+
+    Primary1 -->|"wrong slot? MOVED redirect"| Client
+
+    style Primary1 fill:#a8d5ff,stroke:#333
+    style Primary2 fill:#a8d5ff,stroke:#333
+    style Primary3 fill:#a8d5ff,stroke:#333
+```
+
+**Take this as the reference for why hash tags matter:** `{user:1}:profile` and `{user:1}:settings` both hash on just the `user:1` portion inside the braces, landing on the **same slot** — this is what makes a multi-key operation across those two keys legal; without the shared hash tag, Redis Cluster has no guarantee both keys live on the same primary and will refuse the multi-key operation.
+
+**Replication & HA:** async primary→replica replication (so failover can lose acknowledged writes — [replication lag](../../02-building-blocks/databases/replication/README.md)); **Sentinel** for monitoring + automatic failover; **Redis Cluster** for sharding — 16384 **hash slots** divided among primaries, client-side routing via `MOVED` redirects, multi-key ops only when keys share a slot (hash tags `{user:1}:a`, `{user:1}:b`). This is [consistent-hashing-style sharding](../../02-building-blocks/databases/sharding/README.md) made concrete.
 - **Distributed locks:** `SET lock owner NX PX 30000` — atomic acquire-with-TTL; release must be check-owner-then-delete in a Lua script (atomicity again). Know the caveats (clock/pause hazards; Redlock debate) — for correctness-critical locks, use [CP systems](../zookeeper/README.md).
 
 ## 2. The patterns you'll actually cite

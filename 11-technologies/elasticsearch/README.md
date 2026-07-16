@@ -6,16 +6,31 @@
 
 ## 1. The inverted index, mechanically
 
-```
-Documents:                         Inverted index (term -> posting list):
-  d1: "cheap flights to goa"        cheap   -> [d1, d3]
-  d2: "hotel booking in goa"        flight  -> [d1, d3]        <- "flights" stemmed
-  d3: "cheap flight deals"          goa     -> [d1, d2]
-                                    hotel   -> [d2]
-Query "cheap flights":              book    -> [d2]            <- "booking" stemmed
-  lookup cheap  -> {d1, d3}
-  lookup flight -> {d1, d3}
-  intersect -> {d1, d3}, then RANK by relevance
+```mermaid
+graph LR
+    subgraph Docs["Documents"]
+        D1["d1: cheap flights to goa"]
+        D2["d2: hotel booking in goa"]
+        D3["d3: cheap flight deals"]
+    end
+    subgraph Index["Inverted Index (term → posting list)"]
+        T1["cheap → [d1, d3]"]
+        T2["flight → [d1, d3]<br/>('flights' stemmed)"]
+        T3["goa → [d1, d2]"]
+        T4["hotel → [d2]"]
+        T5["book → [d2]<br/>('booking' stemmed)"]
+    end
+    Query(["Query: 'cheap flights'"])
+    Result(["lookup cheap ∩ lookup flight<br/>= {d1, d3} → RANK by relevance"])
+
+    Docs -.->|indexed via analyzer| Index
+    Query --> T1
+    Query --> T2
+    T1 --> Result
+    T2 --> Result
+
+    style Index fill:#a8d5ff,stroke:#333
+    style Result fill:#c9f7d1,stroke:#333
 ```
 
 - **Analysis pipeline (where search quality lives):** text → tokenizer → filters (lowercase, stopwords, **stemming** "flights"→"flight", synonyms) → terms. The same pipeline runs at *index* time and *query* time — mismatched analyzers are the #1 "why doesn't my search find it" bug. Autocomplete uses **edge n-grams** ("goa" → "g","go","goa") — [precompute-on-write](../../09-interview-prep/tradeoff-cheatsheet.md) applied to prefixes.

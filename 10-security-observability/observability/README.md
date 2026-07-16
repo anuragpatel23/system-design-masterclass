@@ -12,9 +12,41 @@
 
 **Logs** — timestamped, per-event records. Answer: *"what exactly happened in this specific case?"* Production-grade means **structured** (JSON fields, machine-queryable — `{"event":"payment_failed","order_id":...,"decline_code":...}`), centralized (ELK/Loki-class pipeline), sampled/leveled for cost (the priciest pillar per byte), and **always carrying the correlation/trace ID** — the field that stitches the pillars together.
 
+```mermaid
+graph TD
+    subgraph Trace["One Trace (trace_id: abc123)"]
+        S1["Span: Gateway<br/>0-800ms (root span)"]
+        S2["Span: Checkout Service<br/>50-780ms"]
+        S3["Span: Inventory Service<br/>60-120ms"]
+        S4["Span: Payment Service<br/>130-750ms"]
+        S5["Span: DB query (in Payment)<br/>140-720ms ← the culprit"]
+    end
+    S1 --> S2
+    S2 --> S3
+    S2 --> S4
+    S4 --> S5
+
+    style S5 fill:#ffb3b3,stroke:#333
+```
+
+**Take this as the reference for what a trace actually IS:** it's not one flat log line — it's a **tree of timed spans**, each with a parent, propagated via the same `trace_id` in headers across every network hop (gateway → services → queues). The visual immediately answers "where did the 800ms go" in a way a metric or a plain log line alone cannot: the DB query span inside Payment Service is the one eating 580 of the 800 total milliseconds.
+
 **Traces** — the distributed request's biography. One request gets a **trace ID** at the edge, **propagated in headers across every hop** ([gateway](../../02-building-blocks/api-gateway/README.md) → services → [queues](../../02-building-blocks/message-queues/README.md)); each unit of work is a timed **span** with a parent. Answer: *"where did these 800ms go — and which of the 12 services involved is the culprit?"* — the question that is literally unanswerable per-service in a microservice system, which is why [the microservices tax](../../07-microservices/monolith-vs-microservices/README.md) includes tracing as a *requirement*, not a luxury. Costs: instrumentation everywhere (the [service mesh](../../07-microservices/service-mesh/README.md) auto-generates the inter-service spans; in-process detail still needs code), and **sampling** (tracing every request at scale is unaffordable — head-based sampling is cheap but blind; **tail-based sampling** — decide *after* the request whether it was interesting: slow, errored — keeps the traces you actually want at the price of buffering). Standard: **OpenTelemetry** as the vendor-neutral instrumentation layer; Dapper is the lineage paper.
 
-**How an incident actually uses them (the answer's spine):** metric alert fires ("checkout p99 breached") → dashboard localizes (golden signals per service: payments saturated) → traces confirm the path and the hop eating the time → logs on that service, filtered by trace ID, name the cause (connection pool exhausted). **Metrics detect, traces localize, logs explain.**
+```mermaid
+graph LR
+    Alert["1. Metric alert fires:<br/>checkout p99 breached"]
+    Dashboard["2. Dashboard localizes:<br/>golden signals per service --<br/>Payments is saturated"]
+    Trace["3. Traces confirm the path<br/>and the hop eating the time"]
+    Logs["4. Logs on that service,<br/>filtered by trace ID,<br/>name the cause:<br/>connection pool exhausted"]
+
+    Alert --> Dashboard --> Trace --> Logs
+
+    style Alert fill:#f9d976,stroke:#333
+    style Logs fill:#c9f7d1,stroke:#333
+```
+
+**Metrics detect, traces localize, logs explain** — take this pipeline as the reference answer shape for "how do you find the root cause in a system of 50 services": each pillar hands off to the next, narrowing from "something's wrong" to "this exact line of code, on this exact request."
 
 ## 2. SLIs, SLOs, and error budgets — observability turned into policy
 

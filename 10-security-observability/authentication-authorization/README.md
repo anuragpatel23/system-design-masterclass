@@ -14,6 +14,28 @@
 **JWTs (stateless tokens):** on login, the auth service signs a JSON payload of **claims** — `sub` (user), `exp` (expiry), roles/scopes — producing `header.payload.signature`. Services verify the signature **locally with the auth service's public key** — *no lookup, no shared store*.
 
 - **Pros:** perfect for microservices — any of 50 services validates any request in microseconds without calling anyone; claims carry identity + coarse permissions across service hops.
+```mermaid
+sequenceDiagram
+    participant Client
+    participant AuthSvc as Auth Service
+    participant SvcA as Service A
+    participant SvcB as Service B
+
+    Client->>AuthSvc: login
+    AuthSvc->>AuthSvc: sign JWT with PRIVATE key
+    AuthSvc-->>Client: JWT (header.payload.signature)
+
+    Client->>SvcA: request + JWT
+    Note over SvcA: verify signature locally with<br/>Auth Service's PUBLIC key --<br/>NO network call to Auth Service
+    SvcA-->>Client: response
+
+    Client->>SvcB: request + SAME JWT
+    Note over SvcB: verify locally too --<br/>any of 50 services can do this<br/>independently, in microseconds
+    SvcB-->>Client: response
+```
+
+**Take this as the reference for why JWTs fit microservices specifically:** neither Service A nor Service B ever calls the Auth Service to check the token — signature verification with a public key is a **local, offline** computation, which is exactly what eliminates the shared-session-store dependency every request would otherwise pay for.
+
 - **Cons — the revocation problem, mechanically:** the token is self-contained proof, so **it stays valid until `exp` no matter what** — logout, ban, and stolen-token response can't invalidate it without reintroducing state. And the standard resolution: **short-lived access tokens (5–15 min) + long-lived refresh tokens**. The refresh token *is* stateful (stored, revocable server-side); the access token is stateless. Revoking the refresh token caps the damage window at the access token's remaining minutes. You've traded "revocation latency ≤ access-token TTL" for "no per-request lookup" — **state that as the trade and you've answered the depth probe.** (Alternatives — token denylists checked per request — quietly reinvent the session store; fine to name as such.)
 - Also name: JWTs are **signed, not encrypted** (anyone can read the payload — no secrets in claims); the historical `alg: none`/algorithm-confusion attacks (validate algorithm allowlists); clock skew on `exp`.
 
@@ -23,15 +45,23 @@ OAuth 2.0 answers: *how does a user grant app A limited access to their data in 
 
 **Authorization Code flow (the one to know):**
 
-```
-1. Client redirects user to auth server: "requesting scope=read:photos"
-2. User authenticates AT THE AUTH SERVER (client never sees the password)
-   and consents to the scopes
-3. Auth server redirects back with a one-time authorization CODE
-4. Client's BACKEND exchanges code (+ its own client secret) for tokens
-   — the code passed through the browser; the tokens never did
-5. Client calls the resource server with the access token; scopes bound
-   to the token limit what it can do
+```mermaid
+sequenceDiagram
+    participant User
+    participant ClientApp as Client App (A)
+    participant AuthServer as Auth Server (B)
+    participant ResourceServer as Resource Server (B's API)
+
+    User->>ClientApp: "let A access my photos in B"
+    ClientApp->>AuthServer: redirect: requesting scope=read:photos
+    User->>AuthServer: authenticate + consent<br/>(client NEVER sees the password)
+    AuthServer-->>ClientApp: redirect back with one-time CODE
+    Note over ClientApp: code passed through the<br/>browser -- but it's useless alone
+    ClientApp->>AuthServer: (backend) exchange code + client secret
+    AuthServer-->>ClientApp: access token + refresh token
+    Note over ClientApp: tokens NEVER touched the browser
+    ClientApp->>ResourceServer: API call + access token
+    ResourceServer-->>ClientApp: photos (scope-limited)
 ```
 
 - **Why the code indirection exists** (a favorite follow-up): the browser redirect channel is leaky (history, referrers, logs) — so it only ever carries a short-lived, single-use code, useless without the client secret held server-side. For mobile/SPA clients that can't hold a secret, **PKCE** (proof-key: hash a random verifier into the initial request, present the verifier at exchange) closes the interception hole and is now baseline practice.
@@ -41,7 +71,31 @@ OAuth 2.0 answers: *how does a user grant app A limited access to their data in 
 ## 3. Authorization — after "who," decide "may they"
 
 - **RBAC** (roles → permissions; users → roles) covers most products and is where you should start; **ABAC** (policy over attributes: "author OR moderator, if document is in their org and not archived") when rules outgrow roles; **ReBAC** (relationship graphs — "viewer-of via group membership", Google Zanzibar/SpiceDB lineage) for Drive-style sharing at scale.
-- **The vulnerability that actually matters — object-level authorization (BOLA/IDOR):** `GET /orders/789` with a valid token for user A, where 789 belongs to user B — **authentication passed, authorization was never checked per-object**. This is the #1 API vulnerability class in practice ([OWASP API Top 10 #1](../security-essentials/README.md)). The fix is structural: ownership/permission checks in the data access path (`WHERE user_id = :caller` or a central policy check), never "the client only shows their own IDs."
+```mermaid
+sequenceDiagram
+    participant UserA as User A (attacker)
+    participant GW as API Gateway
+    participant Svc as Orders Service
+    participant DB as Orders DB
+
+    UserA->>GW: GET /orders/789 + valid token for User A
+    Note over GW: authenticates fine --<br/>token IS valid, IS User A's
+    GW->>Svc: forward (authenticated)
+    rect rgb(255, 230, 230)
+    Note over Svc: VULNERABLE: no ownership check --<br/>just fetches order 789 for anyone
+    Svc->>DB: SELECT * FROM orders WHERE id=789
+    DB-->>Svc: order 789 (belongs to User B!)
+    Svc-->>UserA: User B's order data LEAKED
+    end
+    rect rgb(230, 255, 230)
+    Note over Svc: FIXED: ownership enforced<br/>in the data access path
+    Svc->>DB: SELECT * FROM orders WHERE id=789 AND user_id=CALLER
+    DB-->>Svc: no rows
+    Svc-->>UserA: 404 Not Found
+    end
+```
+
+**The vulnerability that actually matters — object-level authorization (BOLA/IDOR):** `GET /orders/789` with a valid token for user A, where 789 belongs to user B — **authentication passed, authorization was never checked per-object**. This is the #1 API vulnerability class in practice ([OWASP API Top 10 #1](../security-essentials/README.md)). The fix is structural: ownership/permission checks in the data access path (`WHERE user_id = :caller` or a central policy check), never "the client only shows their own IDs."
 - **Where checks live:** authN + coarse scope checks at the [API gateway](../../02-building-blocks/api-gateway/README.md); **fine-grained object-level authZ in the owning service** (only it knows the domain); service-to-service identity east-west via [mTLS from the mesh](../../07-microservices/service-mesh/README.md) — zero-trust: every hop authenticates, nothing is trusted for being "inside."
 
 ## 4. The rest of the identity toolbox (one line each)

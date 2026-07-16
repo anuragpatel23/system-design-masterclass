@@ -6,6 +6,40 @@
 
 ## 1. Architecture, in the order interviews probe it
 
+```mermaid
+graph TD
+    subgraph Topic["Topic: orders (3 partitions)"]
+        P0["Partition 0<br/>ordered log"]
+        P1["Partition 1<br/>ordered log"]
+        P2["Partition 2<br/>ordered log"]
+    end
+    Producer["Producer<br/>hash(key) % partitions"]
+    Producer -->|"user_id=42 → P1"| P1
+    Producer --> P0
+    Producer --> P2
+
+    subgraph GroupA["Consumer Group A"]
+        CA1["Consumer 1"]
+        CA2["Consumer 2"]
+    end
+    subgraph GroupB["Consumer Group B (independent)"]
+        CB1["Consumer 1"]
+    end
+
+    P0 -->|"exclusive assignment"| CA1
+    P1 -->|"exclusive assignment"| CA1
+    P2 -->|"exclusive assignment"| CA2
+    P0 -.->|"same messages, again"| CB1
+    P1 -.-> CB1
+    P2 -.-> CB1
+
+    style Topic fill:#fff3cd,stroke:#333
+    style GroupA fill:#a8d5ff,stroke:#333
+    style GroupB fill:#c9f7d1,stroke:#333
+```
+
+**Take this as the reference for the "pub/sub and queueing, unified" claim in §1:** within Group A, each partition goes to exactly **one** consumer (queueing semantics — parallel, no duplicate processing); Group B, being a *different* group, independently receives **all** the same messages again from the start of its own offset (pub/sub semantics) — both models fall out of the same mechanism, just by varying whether consumers share a group ID.
+
 - **Topic → partitions:** a topic is split into N partitions; each partition is an **ordered, immutable log** on disk. Ordering is guaranteed **within a partition only** — the produce key (`hash(key) % partitions`) decides the partition, so *"all events for one user are ordered"* means *keying by user_id*. Total order across a topic requires 1 partition (= no parallelism): say this trade-off out loud.
 - **Why so fast:** sequential disk I/O (appends only — the [LSM insight](../../06-databases-deep-dive/b-trees-lsm-trees/README.md) applied to messaging), OS page cache, **zero-copy** `sendfile` to consumers, and batching+compression on the producer. Hundreds of MB/sec per broker is normal.
 - **Consumer groups:** each partition is assigned to **exactly one consumer within a group** → parallelism = partition count; two *different* groups each get all messages (pub/sub and queueing unified). A consumer joining/leaving triggers a **rebalance** (brief pause — an operational fact worth naming). **Offsets** are committed per group to an internal topic (`__consumer_offsets`); commit *after* processing = at-least-once (duplicates possible ⇒ [idempotent consumers](../../08-api-design/idempotency/README.md)); commit *before* = at-most-once.

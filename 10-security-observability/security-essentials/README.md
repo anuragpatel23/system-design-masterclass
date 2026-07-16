@@ -9,6 +9,28 @@
 - **In transit — TLS everywhere, including inside the datacenter.** The modern posture is **zero trust**: "inside the perimeter" is not a trust level, because one compromised box otherwise reads everything east-west. Externally: TLS 1.2+/1.3 at the [gateway/LB](../../02-building-blocks/api-gateway/README.md); internally: [mTLS via the service mesh](../../07-microservices/service-mesh/README.md), which also gives workload *identity*. Know the one-sentence mechanics: asymmetric crypto (certificates) authenticates the server and establishes a shared secret; symmetric crypto (AES-GCM) encrypts the stream — asymmetric for handshake, symmetric for bulk, because it's ~1000x faster.
 - **At rest — layered:** disk/volume encryption (protects against physical theft, nothing else — the running DB decrypts transparently), database/field-level encryption for the crown jewels (SSNs, card numbers — protects against DB compromise and curious insiders, at the cost of losing indexes/queries over those fields), and application-level encryption where the service encrypts before storing (strongest, most operationally expensive).
 - **The real problem is key management** — encryption relocates the secret; it doesn't remove it. The standard answer: a **KMS** (AWS KMS/Vault) holding a **master key** (in HSMs, never exported) that encrypts **data keys** ("envelope encryption": data encrypted with a data key; the data key stored *encrypted by the KMS* next to the data; decryption asks the KMS to unwrap it). What this buys: **rotation** (rewrap data keys, not re-encrypt petabytes), **audit** (every decrypt is a logged KMS call), **revocation** (cut a service's KMS access, its data goes dark). Naming envelope encryption converts "we encrypt at rest" from a checkbox to a mechanism.
+```mermaid
+graph TD
+    KMS["KMS Master Key<br/>lives in HSM, NEVER exported"]
+    DataKey["Data Key<br/>generated per dataset/file"]
+    Data[("Actual Data<br/>encrypted with the Data Key")]
+    EncDataKey["Encrypted Data Key<br/>(wrapped by Master Key)<br/>stored NEXT TO the data"]
+
+    KMS -->|"wraps/encrypts"| DataKey
+    DataKey -->|"encrypts"| Data
+    DataKey -.->|"stored as"| EncDataKey
+
+    subgraph Decrypt["To decrypt later"]
+        Ask["Service asks KMS to unwrap<br/>the Encrypted Data Key"]
+        Ask -->|"KMS logs this call --<br/>audit trail"| KMS
+    end
+
+    style KMS fill:#ffb3b3,stroke:#333
+    style EncDataKey fill:#f9d976,stroke:#333
+```
+
+**Take this as the reference for why envelope encryption isn't just "encryption, but fancier":** the master key **never leaves the HSM and never touches the bulk data directly** — it only ever wraps/unwraps small data keys. This is precisely what makes **rotation** cheap (rewrap the small data keys under a new master key, never re-encrypt petabytes of actual data), **audit** free (every unwrap is a logged KMS call, so "who decrypted what, when" is answered by the KMS's own logs), and **revocation** simple (cut a service's IAM permission to call the KMS, and every dataset it could decrypt goes dark instantly, without touching a single byte of the data itself).
+
 - **Passwords are their own category:** never encrypted (reversible = wrong), only hashed with **slow, salted, memory-hard functions** (argon2/bcrypt) — slowness is the feature: it turns a billions/sec GPU guessing rate into thousands/sec; salts kill rainbow tables and make identical passwords hash differently.
 
 ## 2. Secrets management — the boring gap that causes real breaches
@@ -26,13 +48,28 @@ Config values that *are* secrets (DB passwords, API keys, signing keys) must not
 
 ## 4. Defense in depth — the request-path answer shape
 
-```
-Internet ─► Edge (DDoS scrubbing, WAF, TLS termination)
-         ─► Gateway (authN, coarse authZ, rate limits, input size caps)
-         ─► Service (input validation, object-level authZ, parameterized queries)
-         ─► Mesh (mTLS, workload identity, network policy: orders may call payments — nothing else may)
-         ─► Data (envelope encryption, field-level for crown jewels, least-privilege DB accounts)
-         ─► Everywhere: audit logs, secret rotation, patched dependencies
+```mermaid
+graph TD
+    Internet([Internet])
+    Edge["EDGE<br/>DDoS scrubbing, WAF, TLS termination"]
+    Gateway["GATEWAY<br/>authN, coarse authZ, rate limits, input size caps"]
+    Service["SERVICE<br/>input validation, object-level authZ,<br/>parameterized queries"]
+    Mesh["MESH<br/>mTLS, workload identity,<br/>network policy: orders may call payments — nothing else may"]
+    Data["DATA<br/>envelope encryption, field-level for crown jewels,<br/>least-privilege DB accounts"]
+    Everywhere(["EVERYWHERE<br/>audit logs, secret rotation, patched dependencies"])
+
+    Internet --> Edge --> Gateway --> Service --> Mesh --> Data
+    Everywhere -.-> Edge
+    Everywhere -.-> Gateway
+    Everywhere -.-> Service
+    Everywhere -.-> Mesh
+    Everywhere -.-> Data
+
+    style Edge fill:#ffb3b3,stroke:#333
+    style Gateway fill:#f9d976,stroke:#333
+    style Service fill:#fff3cd,stroke:#333
+    style Mesh fill:#c9f7d1,stroke:#333
+    style Data fill:#a8d5ff,stroke:#333
 ```
 
 Each layer assumes the previous one failed. Two principles to name as you walk it: **least privilege** (every identity — human, service, DB account — gets the minimum; the breach's blast radius is whatever the compromised identity could touch) and **fail closed** for security controls (authz service down ⇒ deny — the deliberate inverse of the availability-biased [fail-open](../../07-microservices/resilience-patterns/README.md) default for auxiliary systems).
